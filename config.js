@@ -1,0 +1,13 @@
+// config.js — настройки. Единственный файл, который нужно заполнить руками.
+window.APP_CONFIG = {
+  // ⚠ ЗАПОЛНИТЬ: Supabase → Project Settings → API
+  SUPABASE_URL: "ВСТАВЬ_URL_ПРОЕКТА",          // ← плейсхолдер, заменить
+  SUPABASE_KEY: "ВСТАВЬ_ПУБЛИЧНЫЙ_КЛЮЧ",       // ← плейсхолдер: anon / publishable. НЕ service_role!
+
+  BUCKET: "charts",              // имя приватного бакета (создаётся скриптом supabase_setup.sql)
+  SIGNED_URL_TTL: 4 * 60 * 60,   // срок подписанных ссылок, секунды (4 часа)
+  MAX_FILE_MB: 10,               // лимит на каждый файл
+  PREVIEW_WIDTH: 600,            // ширина превью, px
+  PREVIEW_QUALITY: 0.85,         // качество WebP
+  UPLOAD_CONCURRENCY: 3          // сколько файлов грузится одновременно
+};

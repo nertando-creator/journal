@@ -1,0 +1,93 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Журнал сетапов</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+
+<!-- ===== ВХОД ===== -->
+<section id="login" hidden>
+  <form id="login-form" class="login-card">
+    <h1>Вход</h1>
+    <label>Почта<input id="login-email" type="email" required autocomplete="username"></label>
+    <label>Пароль<input id="login-pass" type="password" required autocomplete="current-password"></label>
+    <button type="submit" id="login-btn" class="btn">Войти</button>
+    <p id="login-error" class="login-error"></p>
+  </form>
+</section>
+
+<!-- ===== ГЛАВНОЕ ОКНО ===== -->
+<main id="app" class="page" hidden>
+  <div class="search"></div>
+  <div class="tabs-row">
+    <div id="tabs" class="tabs"></div>
+    <span id="upload-status" class="upload-status"></span>
+  </div>
+  <section class="panel"><div id="grid" class="grid"></div></section>
+</main>
+
+<!-- ===== МОДАЛКА ===== -->
+<div id="modal" class="overlay" hidden>
+  <button id="nav-prev" class="nav nav-prev" aria-label="Назад">
+    <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 5l-7 7 7 7"/></svg>
+  </button>
+  <button id="nav-next" class="nav nav-next" aria-label="Вперёд">
+    <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 5l7 7-7 7"/></svg>
+  </button>
+  <div id="modal-box" class="modal">
+    <div class="m-left">
+      <div class="m-frame">
+        <img id="m-img" alt="" draggable="false">
+        <button id="m-trash" class="trash" title="Удалить навсегда">
+          <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18M8 6V4h8v2M6 6l1 14h10l1-14M10 10v7M14 10v7"/></svg>
+        </button>
+      </div>
+    </div>
+    <div class="m-right">
+      <div class="m-title-row">
+        <input id="m-title" class="m-title" type="text" maxlength="200" placeholder="Название" autocomplete="off">
+        <button id="m-star" class="star" title="Избранное">
+          <svg viewBox="0 0 24 24" width="26" height="26" fill="currentColor"><path d="M12 2.5l2.9 6.1 6.6.8-4.9 4.6 1.3 6.6L12 17.3 6.1 20.6l1.3-6.6L2.5 9.4l6.6-.8z"/></svg>
+        </button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ===== ДИАЛОГ (подтверждения, дубли) ===== -->
+<div id="dialog" class="overlay dialog-overlay" hidden>
+  <div class="dialog">
+    <h2 id="dialog-title"></h2>
+    <div id="dialog-body" class="dialog-body"></div>
+    <div id="dialog-btns" class="dialog-btns"></div>
+  </div>
+</div>
+
+<!-- ===== ЛОГИ ===== -->
+<button id="logs-toggle" class="logs-toggle">Логи</button>
+<aside id="logs" class="logs" hidden>
+  <header>
+    <span id="logs-title"></span>
+    <span class="logs-actions">
+      <button id="logs-copy" class="btn small">Скопировать всё</button>
+      <button id="logs-close" class="btn small" aria-label="Закрыть">×</button>
+    </span>
+  </header>
+  <div id="logs-body" class="logs-body"></div>
+</aside>
+
+<div id="toasts" class="toasts"></div>
+
+<!-- Supabase с закреплённой версией -->
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/dist/umd/supabase.min.js"></script>
+<script src="config.js"></script>
+<script src="storage.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
