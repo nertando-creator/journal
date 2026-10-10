@@ -44,6 +44,7 @@
     <div class="m-left">
       <div class="m-frame">
         <div id="m-imgbox" class="m-imgbox">
+        <img id="m-img-prev" alt="" draggable="false">
         <img id="m-img" alt="" draggable="false">
         <button id="m-trash" class="trash" title="Удалить навсегда">
           <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18M8 6V4h8v2M6 6l1 14h10l1-14M10 10v7M14 10v7"/></svg>
@@ -95,6 +96,7 @@
 
 <!-- ===== ЛОГИ ===== -->
 <div class="bottom-bar">
+  <span id="usage" class="stats usage"></span>
   <span id="stats" class="stats"></span>
   <button id="logs-toggle" class="logs-toggle">Логи</button>
 </div>
@@ -102,6 +104,9 @@
   <header>
     <span id="logs-title"></span>
     <span class="logs-actions">
+      <button id="logs-all" class="btn small active">Все</button>
+      <button id="logs-err" class="btn small">Ошибки</button>
+      <button id="logs-clear" class="btn small">Очистить</button>
       <button id="logs-copy" class="btn small">Скопировать всё</button>
       <button id="logs-close" class="btn small" aria-label="Закрыть">×</button>
     </span>
@@ -110,6 +115,7 @@
 </aside>
 
 <div id="toasts" class="toasts"></div>
+<div id="net-banner" class="net-banner" hidden>Нет соединения</div>
 
 <!-- Supabase с закреплённой версией -->
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/dist/umd/supabase.min.js"></script>

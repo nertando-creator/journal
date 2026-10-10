@@ -5,6 +5,21 @@
   let sb = null;
   let authToken = null;   // нужен для запроса keepalive при закрытии вкладки
 
+  const CACHE_CONTROL = '31536000';          // новые файлы: кэш браузера на год (имена файлов уникальны)
+  const RETRY_DELAYS = [500, 1500, 3000];    // до 3 повторов при сбоях сети, пауза растёт
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  let noPreviewCol = false;                  // в images нет колонки preview_size (см. SQL в описании v3.0): пишем без неё
+  let netIsDown = false;
+  function netDown() { if (!netIsDown) { netIsDown = true; if (window.DB && window.DB.onNet) window.DB.onNet(false); } }
+  function netUp() { if (netIsDown) { netIsDown = false; if (window.DB && window.DB.onNet) window.DB.onNet(true); } }
+  // Сбой сети или сервера (повтор имеет смысл), в отличие от ошибок данных и прав (повтор бесполезен)
+  function isTransient(err) {
+    if (!err) return false;
+    const st = Number(err.status || err.statusCode || 0);
+    if (st) return st >= 500 || st === 408 || st === 429;
+    return /failed to fetch|fetch|network|timeout|timed out|load failed|connection|aborted|offline/i.test(String(err.message || err));
+  }
+
   // Настоящий текст ошибки Supabase: сообщение, имя, HTTP-статус, код, детали, подсказка
   function describe(error) {
     if (!error) return 'неизвестная ошибка';
@@ -23,6 +38,7 @@
   function fail(ctx, error) {
     const e = new Error(`${ctx}: ${describe(error)}`);
     if (error && error.code) e.code = error.code;
+    e.transient = isTransient(error);
     throw e;
   }
   // у картинки теги приходят вложенной выборкой image_tags → превращаем в tag_ids
@@ -123,24 +139,44 @@
       const originalPath = `${uid}/original/${meta.id}.${meta.ext}`;
       const previewPath = `${uid}/preview/${meta.id}.webp`;
       const uploaded = [];
-      const put = async (path, blob, type) => {
-        const { error } = await sb.storage.from(cfg.BUCKET).upload(path, blob, { contentType: type, upsert: false, cacheControl: '3600' });
-        if (error) fail(`Хранилище: загрузка ${path}`, error);
-        uploaded.push(path);
+      // до 3 повторов при сбоях сети; пути уникальны, поэтому повторная загрузка безопасна (upsert)
+      const attempt = async (label, fn) => {
+        for (let i = 0; ; i++) {
+          const res = await Promise.resolve().then(fn).catch((e) => ({ error: e }));   // конструктор запроса Supabase не Promise, поэтому оборачиваем
+          if (!res.error) { netUp(); return res; }
+          if (!isTransient(res.error)) { netUp(); return res; }
+          netDown();
+          if (i >= RETRY_DELAYS.length) return res;
+          if (window.DB.onRetry) window.DB.onRetry(label, i + 1, res.error);
+          await sleep(RETRY_DELAYS[i]);
+        }
       };
       try {
-        await put(originalPath, file, mime);
-        await put(previewPath, previewBlob, previewBlob.type || 'image/webp');
+        for (const [path, blob, type] of [[originalPath, file, mime], [previewPath, previewBlob, previewBlob.type || 'image/webp']]) {
+          const r = await attempt('загрузка файла', () => sb.storage.from(cfg.BUCKET).upload(path, blob, { contentType: type, upsert: true, cacheControl: CACHE_CONTROL }));
+          if (r.error) fail(`Хранилище: загрузка ${path}`, r.error);
+          uploaded.push(path);
+        }
         const row = {
           id: meta.id, title: meta.title, folder_id: meta.folder_id, created_at: meta.created_at,
           hash: meta.hash, width: meta.width, height: meta.height, size: meta.size,
           original_path: originalPath, preview_path: previewPath
         };
-        const { data, error } = await sb.from('images').insert(row).select().single();
-        if (error) fail('База: добавление картинки', error);
-        return normImage(data);
+        if (!noPreviewCol) row.preview_size = previewBlob.size;
+        const ins = () => sb.from('images').insert(row).select().single();
+        let res = await attempt('запись в базу', ins);
+        if (res.error && row.preview_size !== undefined && /preview_size/.test(res.error.message || '')) {
+          noPreviewCol = true; delete row.preview_size;           // колонки ещё нет: пишем без размера превью
+          res = await attempt('запись в базу', ins);
+        }
+        if (res.error && res.error.code === '23505') {            // повтор после потерянного ответа: запись уже есть
+          res = await sb.from('images').select('*, image_tags(tag_id)').eq('id', meta.id).single();
+        }
+        if (res.error) fail('База: добавление картинки', res.error);
+        return normImage(res.data);
       } catch (e) {
-        if (uploaded.length) await sb.storage.from(cfg.BUCKET).remove(uploaded);
+        // при обрыве связи не знаем, записалась ли строка: файлы не трогаем, чтобы не сломать возможную запись
+        if (uploaded.length && !e.transient) await sb.storage.from(cfg.BUCKET).remove(uploaded);
         throw e;
       }
     },
@@ -246,6 +282,35 @@
       }
     },
 
+    // ---------- фоновая подгрузка, занятое место, проверка связи ----------
+    async listAllImages() {
+      const all = [];
+      for (let from = 0; ; from += 1000) {
+        const { data, error } = await sb.from('images').select('*, image_tags(tag_id)').order('created_at', { ascending: false }).range(from, from + 999);
+        if (error) fail('Картинки: фоновая загрузка', error);
+        all.push(...data);
+        if (data.length < 1000) break;
+      }
+      return all.map(normImage);
+    },
+    async listUsage() {                      // размеры файлов; preview_size может отсутствовать (тогда оценка в app.js)
+      const all = [];
+      for (let from = 0; ; from += 1000) {
+        let { data, error } = await sb.from('images').select('size,preview_size').order('id').range(from, from + 999);
+        if (error && /preview_size/.test(error.message || '')) ({ data, error } = await sb.from('images').select('size').order('id').range(from, from + 999));
+        if (error) fail('Занятое место', error);
+        all.push(...data);
+        if (data.length < 1000) break;
+      }
+      return all;
+    },
+    async ping() {
+      const { error } = await sb.from('folders').select('id').limit(1);
+      if (error && isTransient(error)) { netDown(); throw new Error(describe(error)); }
+      netUp();
+    },
+    markDown() { netDown(); },
+
     // ---------- подписанные ссылки ----------
     async signUrls(paths, ttl) {
       const { data, error } = await sb.storage.from(cfg.BUCKET).createSignedUrls(paths, ttl);
@@ -253,4 +318,24 @@
       return data;
     }
   };
+
+  // Повторы при сбоях сети для безопасных (идемпотентных) операций: до 3 раз с растущей паузой.
+  // Создание папки и тега не повторяем: повтор мог бы создать дубль.
+  ['getSession', 'listFolders', 'renameFolder', 'saveFolderOrder', 'listImages', 'listAllImages', 'listUsage', 'updateImage', 'deleteImage',
+   'listTags', 'setImageTag', 'countImages', 'countTagUsage', 'deleteTag', 'signUrls'].forEach((name) => {
+    const orig = window.DB[name];
+    window.DB[name] = async function (...args) {
+      for (let i = 0; ; i++) {
+        try { const r = await orig.apply(window.DB, args); netUp(); return r; }
+        catch (e) {
+          const tr = e.transient !== undefined ? e.transient : isTransient(e);
+          if (!tr) { netUp(); throw e; }
+          netDown();
+          if (i >= RETRY_DELAYS.length) throw e;
+          if (window.DB.onRetry) window.DB.onRetry(name, i + 1, e);
+          await sleep(RETRY_DELAYS[i]);
+        }
+      }
+    };
+  });
 })();

@@ -1,20 +1,55 @@
 /* app.js — интерфейс. С Supabase общается только через DB (storage.js). */
-const APP_VERSION = 'v2.5';
+const APP_VERSION = 'v3.0';
 const CFG = window.APP_CONFIG;
 const $ = (s, r = document) => r.querySelector(s);
 
+// ---- настройки, которые удобно менять одной строкой ----
+const STORAGE_LIMIT_BYTES = 1024 ** 3;   // лимит хранилища (1 ГБ) для текста «Занято: X из …»
+const GRID_CHUNK = 80;                   // сколько карточек добавляется за раз при прокрутке
+const SKELETON_COUNT = 14;               // заглушек в сетке, пока грузится список
+const PREVIEW_RATIO = 0.15;              // оценка размера превью от оригинала, если реальный размер не записан
+const LOGS_KEEP = 200;                   // сколько последних записей логов хранить в браузере
+const PRELOAD_CONCURRENCY = 4;           // сколько превью одновременно подгружать в фоне
+const URL_REFRESH_MS = 10 * 60 * 1000;   // за сколько до конца срока обновлять подписанную ссылку
+
 /* ================= ЛОГИ И УВЕДОМЛЕНИЯ ================= */
-const logLines = [];
-function log(level, msg) {
-  const line = `[${new Date().toLocaleTimeString('ru-RU')}] [${level}] ${msg}`;
-  logLines.push(line);
-  const d = document.createElement('div');
-  d.className = 'log-' + level;
-  d.textContent = line;
-  const body = $('#logs-body');
-  body.appendChild(d);
+// Логи: последние LOGS_KEEP записей хранятся в localStorage и переживают F5
+const LOGS_KEY = 'journal_logs_v1';
+let logEntries = [];
+let logSaveTimer = null;
+function loadLogs() {
+  try {
+    const a = JSON.parse(localStorage.getItem(LOGS_KEY) || '[]');
+    if (Array.isArray(a)) logEntries = a.filter((x) => x && x.level && x.line).slice(-LOGS_KEEP);
+  } catch { /* localStorage недоступен или пуст */ }
+}
+function saveLogsNow() { try { localStorage.setItem(LOGS_KEY, JSON.stringify(logEntries)); } catch { /* переполнение или запрет: не критично */ } }
+function saveLogsSoon() { clearTimeout(logSaveTimer); logSaveTimer = setTimeout(saveLogsNow, 400); }
+function logRow(e) { const d = document.createElement('div'); d.className = 'log-' + e.level; d.textContent = e.line; return d; }
+function renderLogs() {
+  const body = $('#logs-body'); body.textContent = '';
+  logEntries.forEach((e) => body.appendChild(logRow(e)));
   body.scrollTop = body.scrollHeight;
-  (level === 'ERR' ? console.error : console.log)(line);
+}
+function log(level, msg) {
+  const when = new Date().toLocaleString('ru-RU', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit' });
+  const e = { level, line: `[${when}] [${level}] ${msg}` };
+  logEntries.push(e);
+  const body = $('#logs-body');
+  if (logEntries.length > LOGS_KEEP) { logEntries.shift(); if (body.firstChild) body.firstChild.remove(); }
+  body.appendChild(logRow(e));
+  body.scrollTop = body.scrollHeight;
+  (level === 'ERR' ? console.error : console.log)(e.line);
+  saveLogsSoon();
+}
+function setLogFilter(mode) {
+  $('#logs-body').classList.toggle('only-err', mode === 'err');
+  $('#logs-all').classList.toggle('active', mode !== 'err');
+  $('#logs-err').classList.toggle('active', mode === 'err');
+}
+function clearLogs() {
+  logEntries = []; renderLogs();
+  try { localStorage.removeItem(LOGS_KEY); } catch { /* ничего */ }
 }
 const logI = (m) => log('INFO', m);
 const logW = (m) => log('WARN', m);
@@ -34,7 +69,7 @@ function toast(msg) {
 }
 
 async function copyLogs() {
-  const text = `Журнал сетапов ${APP_VERSION}\n` + logLines.join('\n');
+  const text = `Журнал сетапов ${APP_VERSION}\n` + logEntries.map((e) => e.line).join('\n');
   try { await navigator.clipboard.writeText(text); }
   catch {
     const ta = document.createElement('textarea');
@@ -52,7 +87,11 @@ const state = {
   folders: [],
   tags: [],                    // общие теги (все вкладки)
   menu: null,                  // открытый выпадающий список
-  loadingImages: false,        // идёт загрузка списка: счётчики пока пустые
+  loadingImages: false,        // идёт загрузка списка: заглушки вместо карточек
+  loadFailed: false,           // последняя загрузка списка не удалась
+  gridCount: GRID_CHUNK,       // сколько карточек сейчас показано (порциями)
+  usedBytes: null,             // занятое место (оригиналы + превью)
+  usedApprox: false,           // в сумме есть оценка размера превью
   activeFolder: null,          // null = «Не отсортированные»
   images: [],                  // картинки активной вкладки, новые первыми
   pending: [],                 // заглушки загружаемых файлов
@@ -65,25 +104,48 @@ const ICON_PLUS = '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" s
 const ICON_TRASH = '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18M8 6V4h8v2M6 6l1 14h10l1-14M10 10v7M14 10v7"/></svg>';
 
 const plural = (n, f) => { const a = Math.abs(n) % 100, b = a % 10; return a > 10 && a < 20 ? f[2] : b === 1 ? f[0] : b >= 2 && b <= 4 ? f[1] : f[2]; };
-const ICON_CLOSE = '<svg viewBox="0 0 10 10" width="8" height="8"><path d="M1 1l8 8M9 1l-8 8" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg>';
+const ICON_CLOSE = '<svg viewBox="0 0 10 10" ><path d="M1 1l8 8M9 1l-8 8" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg>';
 const folderName = (id) => id === null || id === undefined ? 'Не отсортированные' : ((state.folders.find((f) => f.id === id) || {}).name || '?');
 const isTyping = (t) => !!t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable);
 const byDateDesc = (a, b) => new Date(b.created_at) - new Date(a.created_at);
 const el = (tag, cls, text) => { const n = document.createElement(tag); if (cls) n.className = cls; if (text !== undefined) n.textContent = text; return n; };
 
 /* ================= ПОДПИСАННЫЕ ССЫЛКИ ================= */
+// Подписанные ссылки живут в памяти и в sessionStorage (переживают F5 в этой вкладке): адрес не меняется,
+// поэтому кэш браузера работает. Срок задаёт config.js (SIGNED_URL_TTL); перед концом срока ссылка обновляется.
+const URL_STORE_KEY = 'journal_urls_v1';
 const urlCache = new Map(); // path -> { url, exp }
-async function ensureUrls(paths) {
-  const now = Date.now();
-  const need = [...new Set(paths.filter(Boolean))].filter((p) => !urlCache.has(p) || urlCache.get(p).exp - now < 10 * 60 * 1000);
-  if (!need.length) return;
+(function restoreUrls() {
   try {
-    const res = await DB.signUrls(need, CFG.SIGNED_URL_TTL);
-    res.forEach((r) => {
-      if (r.error || !r.signedUrl) { logE(`Нет ссылки для ${r.path}: ${r.error}`); return; }
-      urlCache.set(r.path, { url: r.signedUrl, exp: now + CFG.SIGNED_URL_TTL * 1000 });
-    });
-  } catch (e) { logE(errMsg(e)); }
+    const o = JSON.parse(sessionStorage.getItem(URL_STORE_KEY) || '{}'), now = Date.now();
+    Object.entries(o).forEach(([p, v]) => { if (v && v.url && v.exp - now > 2 * URL_REFRESH_MS) urlCache.set(p, v); });
+  } catch { /* sessionStorage недоступен: работаем из памяти */ }
+})();
+let urlSaveTimer = null;
+function saveUrlsSoon() {
+  clearTimeout(urlSaveTimer);
+  urlSaveTimer = setTimeout(() => { try { sessionStorage.setItem(URL_STORE_KEY, JSON.stringify(Object.fromEntries(urlCache))); } catch { /* не критично */ } }, 1000);
+}
+const hasUrl = (p) => { const c = urlCache.get(p); return !!c && c.exp - Date.now() > URL_REFRESH_MS; };
+const urlKey = (u) => { try { return new URL(u, location.href).href; } catch { return u; } };
+const loadedUrls = new Set();      // адреса, которые уже загружались в этой сессии (заглушка не мигает)
+const markLoaded = (u) => { if (u) loadedUrls.add(urlKey(u)); };
+const wasLoaded = (u) => !!u && loadedUrls.has(urlKey(u));
+async function ensureUrls(paths) {
+  const need = [...new Set(paths.filter(Boolean))].filter((p) => !hasUrl(p));
+  if (!need.length) return;
+  const chunks = [];
+  for (let i = 0; i < need.length; i += 100) chunks.push(need.slice(i, i + 100));
+  await runPool(chunks, 2, async (chunk) => {
+    try {
+      const res = await DB.signUrls(chunk, CFG.SIGNED_URL_TTL), now = Date.now();
+      res.forEach((r) => {
+        if (r.error || !r.signedUrl) { logE(`Нет ссылки для ${r.path}: ${r.error}`); return; }
+        urlCache.set(r.path, { url: r.signedUrl, exp: now + CFG.SIGNED_URL_TTL * 1000 });
+      });
+    } catch (e) { logE(errMsg(e)); }
+  });
+  saveUrlsSoon();
 }
 // Привязывает картинку к пути в хранилище; при ошибке один раз обновляет ссылку
 function bindImg(img, path) {
@@ -128,17 +190,21 @@ function showLogin() {
   $('#app').hidden = true;
   $('#login').hidden = false;
   $('#stats').textContent = '';
+  $('#usage').textContent = ''; state.usedBytes = null;
 }
 async function enterApp() {
   $('#login').hidden = true;
   $('#app').hidden = false;
   logI('Вход выполнен');
+  state.loadingImages = true; renderTabs(); renderGrid();       // первая загрузка: заглушки вместо карточек
+  refreshUsage();
   try { state.folders = await DB.listFolders(); }
   catch (e) { logE(errMsg(e)); toast('Не удалось загрузить папки'); }
   try { state.tags = await DB.listTags(); }
   catch (e) { logE(errMsg(e)); toast('Не удалось загрузить теги'); }
   renderTabs();
   await loadImages();
+  prefetchAll();                   // фоном: списки и превью остальных вкладок
 }
 
 /* ================= ВКЛАДКИ ================= */
@@ -166,13 +232,16 @@ function makeTab(id, name) {
 }
 async function setActiveFolder(id) {
   if (id === state.activeFolder) return;
+  tabCache.set(state.activeFolder, state.images.filter(belongsHere));   // запомнить список ушедшей вкладки
+  const cached = tabCache.has(id);
   state.activeFolder = id;
-  state.images = [];
-  state.loadingImages = true;
+  state.gridCount = GRID_CHUNK;
+  if (cached) { state.images = tabCache.get(id).slice(); state.loadingImages = false; }   // мгновенно из кэша
+  else { state.images = []; state.loadingImages = true; }
   renderTabs();
   renderGrid();
   await settleSaves();       // дописать несохранённое, чтобы перезагрузка не показала старые данные
-  await loadImages();
+  await loadImages({ quiet: cached });   // свежий список подтягивается фоном
 }
 async function createFolder() {
   try {
@@ -209,37 +278,74 @@ function startRename(id) {
 }
 
 /* ================= СЕТКА ================= */
-async function loadImages() {
+async function loadImages({ quiet = false } = {}) {
   const seq = ++state.loadSeq;
   const folder = state.activeFolder;
-  state.loadingImages = true;
+  if (!quiet) state.loadingImages = true;
+  const t0 = performance.now();
   try {
     const rows = await DB.listImages(folder);
+    const t1 = performance.now();
+    const had = rows.filter((r) => hasUrl(r.preview_path)).length;
     await ensureUrls(rows.map((r) => r.preview_path));
+    const t2 = performance.now();
     if (seq !== state.loadSeq) return;        // успели переключить вкладку
+    state.loadFailed = false;
+    logI(`⏱ Вкладка «${folderName(folder)}»${quiet ? ' (фон)' : ''}: ${rows.length} шт., список ${ms(t1 - t0)} мс, ссылки ${ms(t2 - t1)} мс (уже были ${had}/${rows.length})`);
+    if (quiet && (isModalOpen() || hasUnsaved())) return;   // не затираем то, что сейчас правится
     state.images = rows;
     state.loadingImages = false;
     renderGrid();
-    logI(`Вкладка «${folderName(folder)}»: ${rows.length} шт.`);
   } catch (e) {
     if (seq !== state.loadSeq) return;
-    state.loadingImages = false; updateStats();
-    logE(errMsg(e)); toast('Не удалось загрузить картинки');
+    logE(errMsg(e));
+    if (quiet) return;                         // показываем кэш, фоновое обновление не удалось
+    state.loadingImages = false; state.loadFailed = true;
+    toast('Не удалось загрузить картинки');
+    renderGrid();
   }
 }
+// Сетка порциями: следующая порция добавляется, когда прокрутка подходит к концу
+const gridObserver = new IntersectionObserver((entries) => {
+  if (entries.some((e) => e.isIntersecting)) { state.gridCount += GRID_CHUNK; appendCards(); }
+}, { rootMargin: '800px' });
 function renderGrid() {
   const grid = $('#grid'); grid.textContent = '';
-  state.pending.filter((p) => p.folderId === state.activeFolder).forEach((p) => grid.appendChild(pendingCard(p)));
-  state.images.forEach((im) => grid.appendChild(imageCard(im)));
+  gridObserver.disconnect();
+  const pend = state.pending.filter((p) => p.folderId === state.activeFolder);
+  pend.forEach((p) => grid.appendChild(pendingCard(p)));
+  if (state.loadingImages) { for (let i = 0; i < SKELETON_COUNT; i++) grid.appendChild(skeletonCard()); }
+  else if (!state.images.length && !pend.length) {
+    grid.appendChild(el('div', 'empty-hint', state.loadFailed
+      ? 'Не удалось загрузить картинки. Попробую ещё раз, когда появится связь'
+      : 'Здесь пока пусто. Перетащи картинки или нажми Ctrl+V'));
+  } else appendCards();
   updateStats();
+}
+function appendCards() {
+  const grid = $('#grid');
+  gridObserver.disconnect();
+  const old = grid.querySelector('.grid-sentinel'); if (old) old.remove();
+  const have = grid.querySelectorAll('.card:not(.pending)').length;
+  state.images.slice(have, state.gridCount).forEach((im) => grid.appendChild(imageCard(im)));
+  if (state.images.length > state.gridCount) { const sen = el('div', 'grid-sentinel'); grid.appendChild(sen); gridObserver.observe(sen); }
+}
+function skeletonCard() {
+  const c = el('div', 'card skeleton');
+  c.innerHTML = '<div class="thumb loading"></div><div class="cap sk"></div>';
+  return c;
 }
 function imageCard(im) {
   const c = el('div', 'card'); c.dataset.id = im.id;
   c.innerHTML = `<div class="thumb"><img alt="" draggable="false"><button class="trash" title="Удалить навсегда">${ICON_TRASH}</button></div><div class="cap"></div>`;
-  const img = $('img', c);
+  const img = $('img', c), thumb = $('.thumb', c);
   img.style.setProperty('--w', im.width || 235);
   img.style.setProperty('--h', im.height || 153);
   img.loading = 'lazy';
+  const known = urlCache.get(im.preview_path);
+  if (!(known && wasLoaded(known.url))) thumb.classList.add('loading');   // мягкая заглушка, пока превью грузится
+  img.addEventListener('load', () => { thumb.classList.remove('loading'); markLoaded(img.currentSrc || img.src); });
+  img.addEventListener('error', () => thumb.classList.remove('loading'));
   bindImg(img, im.preview_path);
   $('.cap', c).textContent = im.title || 'Без названия';
   c.addEventListener('click', () => openModal(im.id));
@@ -388,6 +494,7 @@ async function uploadOne(it, folderId) {
     const { width, height, preview } = await makePreview(it.file);
     const row = await DB.addImage({ id: it.id, title: it.title, folder_id: folderId, created_at: it.createdAt, hash: it.hash, width, height, size: it.file.size, ext: MIME_EXT[it.mime] }, it.file, it.mime, preview);
     await ensureUrls([row.preview_path]);
+    addUsage(row, 1);
     removePending(it.id);
     if (state.activeFolder === folderId) { state.images.push(row); state.images.sort(byDateDesc); }
     state.up.done++;
@@ -598,18 +705,37 @@ function openModal(id) {
   purgeMoved(id);
   $('#modal').hidden = false;
   fitModal();
-  const img = $('#m-img');
-  img.removeAttribute('src'); delete img.dataset.retry;
+  const img = $('#m-img'), prev = $('#m-img-prev');
+  img.classList.remove('ready'); img.removeAttribute('src'); delete img.dataset.retry;
+  prev.removeAttribute('src');
   sizeModalImage(im);
   modalPath = im.original_path;
   saver.saved.delete(saveKey(id, 'comment'));
   fillPanel(im);
   updateNav();
-  ensureUrls([im.original_path]).then(() => {
+  // превью уже в кэше: показываем сразу, оригинал подставляем поверх, когда догрузится
+  const pc = urlCache.get(im.preview_path);
+  if (pc) prev.src = pc.url;
+  const t0 = performance.now(), cached = hasUrl(im.original_path);
+  const showOriginal = () => {
     if (state.modalId !== id) return;
     const c = urlCache.get(im.original_path);
-    if (c) img.src = c.url;
-  });
+    if (!c) return;
+    const p2 = urlCache.get(im.preview_path);
+    if (p2 && !prev.getAttribute('src')) prev.src = p2.url;
+    const t1 = performance.now();
+    img.onload = () => {
+      if (state.modalId !== id) return;
+      img.classList.add('ready'); markLoaded(c.url);
+      logI(`⏱ Открыто «${im.title || 'Без названия'}»: ссылка ${ms(t1 - t0)} мс${cached ? ' (из кэша)' : ''}, оригинал ${ms(performance.now() - t1)} мс`);
+    };
+    img.src = c.url;
+  };
+  if (cached) showOriginal(); else ensureUrls([im.original_path, im.preview_path]).then(showOriginal);
+  // соседние картинки (предыдущая и следующая): оригиналы подписываем и догружаем заранее
+  const i = state.images.findIndex((x) => x.id === id);
+  const near = [state.images[i - 1], state.images[i + 1]].filter(Boolean).map((x) => x.original_path);
+  ensureUrls(near).then(() => near.forEach(preloadOne));
 }
 function closeModal() {
   if (!isModalOpen()) return;
@@ -655,13 +781,13 @@ function renderTags(im) {
 }
 function renderStatus(im) {
   const st = statusDef(im.status), v = $('#status-select .sel-val'); v.textContent = '';
-  if (st.color) v.appendChild(chipEl(st.label, { color: st.color, sm: true }));
+  if (st.color) v.appendChild(chipEl(st.label, { color: st.color }));
   else v.appendChild(el('span', 'dash', '—'));      // «без статуса» показываем прочерком
 }
 function renderFolder(im) {
   const v = $('#folder-select .sel-val'); v.textContent = '';
   if (im.folder_id == null) v.appendChild(el('span', 'dash', '—'));
-  else v.appendChild(chipEl(folderName(im.folder_id), { sm: true }));
+  else v.appendChild(chipEl(folderName(im.folder_id)));
 }
 
 // Выпадающие списки: один открытый за раз; закрываются кликом снаружи и Esc
@@ -672,9 +798,10 @@ function toggleMenu(name, host, render, cls = '') {
   render(m);
   if (!m.children.length) return;           // нечего показывать (например, папок ещё нет)
   host.appendChild(m);
+  host.classList.add('open');               // треугольник разворачивается вниз
   state.menu = { name, host, el: m, render };
 }
-function closeMenu() { if (state.menu) { state.menu.el.remove(); state.menu = null; } }
+function closeMenu() { if (state.menu) { state.menu.host.classList.remove('open'); state.menu.el.remove(); state.menu = null; } }
 function refreshMenu() { if (state.menu) { const m = state.menu.el; m.textContent = ''; state.menu.render(m); } }
 function menuItem(node, selected) {
   const b = el('button', 'menu-item' + (selected ? ' sel' : '')); b.type = 'button';
@@ -718,7 +845,7 @@ function renderStatusMenu(m) {
   const im = curImage(); if (!im) return;
   STATUSES.filter((s) => s.color).forEach((s) => {     // только реальные значения; повторный клик снимает выбор
     const on = (im.status || 'none') === s.id;
-    const r = menuItem(chipEl(s.label, { color: s.color, sm: true }), on);
+    const r = menuItem(chipEl(s.label, { color: s.color }), on);
     r.onclick = () => { setStatus(on ? 'none' : s.id); closeMenu(); };
     m.appendChild(r);
   });
@@ -728,7 +855,7 @@ function renderFolderMenu(m) {
   const cur = im.folder_id == null ? null : im.folder_id;
   state.folders.forEach((f) => {                         // только существующие папки; повторный клик снимает выбор
     const on = cur === f.id;
-    const r = menuItem(chipEl(f.name, { sm: true }), on);
+    const r = menuItem(chipEl(f.name), on);
     r.onclick = () => { setFolder(on ? null : f.id); closeMenu(); };
     m.appendChild(r);
   });
@@ -840,6 +967,7 @@ async function deleteImage(id) {
     return;
   }
   dropSaves(id);
+  addUsage(im, -1);
   state.images.splice(idx, 1);
   logI(`Удалено навсегда: «${im.title || 'Без названия'}»`);
   renderGrid();
@@ -854,7 +982,8 @@ async function deleteImage(id) {
 function updateStats() {
   const box = $('#stats');
   if (!box) return;
-  if ($('#app').hidden || state.loadingImages) { box.textContent = ''; return; }
+  if ($('#app').hidden) { box.textContent = ''; return; }
+  if (state.loadingImages) { box.textContent = 'Загрузка…'; return; }
   const list = state.images.filter(belongsHere);     // перенесённые в другую папку уже не считаются
   const s = list.filter((i) => i.status === 'success').length;
   const f = list.filter((i) => i.status === 'fail').length;
@@ -960,6 +1089,7 @@ async function deleteFolder(id) {
   res.failures.forEach((m) => logE(`Папка «${f.name}»: ${m}`));
   if (res.folderDeleted) {
     state.folders = state.folders.filter((x) => x.id !== id);
+    tabCache.delete(id); refreshUsage();
     logI(`Папка «${f.name}» удалена: картинок ${res.deleted}, файлов в хранилище ${res.files}`);
     if (state.activeFolder === id) await setActiveFolder(null); else renderTabs();
   } else {
@@ -999,12 +1129,105 @@ async function deleteTag(t) {
   logI(`Тег «${t.name}» удалён (стоял на картинках: ${n})`);
 }
 
+/* ================= ФОН: ПРЕДЗАГРУЗКА, СЕТЬ, ЗАНЯТОЕ МЕСТО ================= */
+const ms = (v) => Math.round(v);
+const tabCache = new Map();           // списки картинок по вкладкам: переключение вкладок мгновенное
+const preloaded = new Set();
+function preloadOne(path) {           // скачивает картинку «вхолостую», чтобы она оказалась в кэше браузера
+  const c = urlCache.get(path);
+  if (!c || preloaded.has(c.url)) return Promise.resolve();
+  preloaded.add(c.url);
+  return new Promise((res) => {
+    const i = new Image();
+    i.onload = () => { markLoaded(c.url); res(); };
+    i.onerror = () => res();
+    setTimeout(res, 20000);
+    i.decoding = 'async';
+    try { i.fetchPriority = 'low'; } catch { /* старый браузер */ }
+    i.src = c.url;
+  });
+}
+const preloadMany = (paths) => runPool(paths, PRELOAD_CONCURRENCY, preloadOne);
+let prefetching = false;
+async function prefetchAll() {
+  if (prefetching) return;
+  prefetching = true;
+  const t0 = performance.now();
+  try {
+    const rows = await DB.listAllImages();
+    const groups = new Map();
+    rows.forEach((r) => { const k = r.folder_id == null ? null : r.folder_id; if (!groups.has(k)) groups.set(k, []); groups.get(k).push(r); });
+    const keys = [null, ...state.folders.map((f) => f.id)];
+    keys.forEach((k) => { if (k !== state.activeFolder && !tabCache.has(k)) tabCache.set(k, groups.get(k) || []); });
+    const others = keys.filter((k) => k !== state.activeFolder).flatMap((k) => groups.get(k) || []);
+    const t1 = performance.now();
+    await ensureUrls(others.map((r) => r.preview_path));
+    const t2 = performance.now();
+    await preloadMany(others.map((r) => r.preview_path));
+    const t3 = performance.now();
+    await ensureUrls(rows.map((r) => r.original_path));       // оригиналы только подписываем, не качаем
+    logI(`⏱ Фон: списки ${ms(t1 - t0)} мс, ссылки на превью ${ms(t2 - t1)} мс, превью скачано ${others.length} шт. за ${ms(t3 - t2)} мс, ссылки на оригиналы ${ms(performance.now() - t3)} мс`);
+  } catch (e) { logE(`Фоновая подгрузка: ${errMsg(e)}`); }
+  finally { prefetching = false; }
+}
+
+// Связь: неброская плашка, пропадает сама, когда связь вернулась
+let netProbe = null;
+function setNet(up) {
+  $('#net-banner').hidden = up;
+  if (up) {
+    logI('Соединение восстановлено');
+    clearInterval(netProbe); netProbe = null;
+    flushAll();
+    if (state.loadFailed) loadImages();
+  } else {
+    logW('Нет соединения');
+    if (!netProbe) netProbe = setInterval(() => DB.ping().catch(() => {}), 5000);
+  }
+}
+
+// Занятое место: оригиналы + превью (реальный размер, если записан в preview_size, иначе оценка)
+const previewBytes = (r) => (r.preview_size != null ? Number(r.preview_size) : Math.round(Number(r.size || 0) * PREVIEW_RATIO));
+const rowBytes = (r) => Number(r.size || 0) + previewBytes(r);
+function fmtBytes(b) {
+  const KB = 1024, MB = KB * 1024, GB = MB * 1024;
+  if (b >= GB) return `${+(b / GB).toFixed(2)} ГБ`;
+  if (b >= MB) return `${Math.round(b / MB)} МБ`;
+  return `${Math.round(b / KB)} КБ`;
+}
+function renderUsage() {
+  const box = $('#usage');
+  if (state.usedBytes === null || $('#app').hidden) { box.textContent = ''; return; }
+  const share = state.usedBytes / STORAGE_LIMIT_BYTES;
+  box.textContent = `Занято: ${state.usedApprox ? '≈' : ''}${fmtBytes(state.usedBytes)} из ${fmtBytes(STORAGE_LIMIT_BYTES)}`;
+  box.classList.toggle('warn', share > 0.8 && share < 1);
+  box.classList.toggle('over', share >= 1);
+}
+function addUsage(r, sign) {
+  if (state.usedBytes === null) return;
+  state.usedBytes = Math.max(0, state.usedBytes + sign * rowBytes(r));
+  if (sign > 0 && r.preview_size == null) state.usedApprox = true;
+  renderUsage();
+}
+async function refreshUsage() {
+  try {
+    const rows = await DB.listUsage();
+    state.usedBytes = rows.reduce((sum, r) => sum + rowBytes(r), 0);
+    state.usedApprox = rows.some((r) => r.preview_size == null);
+    renderUsage();
+  } catch (e) { logE(`Занятое место не посчитано: ${errMsg(e)}`); }
+}
+
 /* ================= СОБЫТИЯ ================= */
 function bindUI() {
   // логи
   $('#logs-toggle').onclick = () => { $('#logs').hidden = !$('#logs').hidden; };
   $('#logs-close').onclick = () => { $('#logs').hidden = true; };
   $('#logs-copy').onclick = copyLogs;
+  $('#logs-all').onclick = () => setLogFilter('all');
+  $('#logs-err').onclick = () => setLogFilter('err');
+  $('#logs-clear').onclick = clearLogs;
+  window.addEventListener('pagehide', saveLogsNow);
 
   // вход
   $('#login-form').addEventListener('submit', async (e) => {
@@ -1079,6 +1302,7 @@ function bindUI() {
 /* ================= СТАРТ ================= */
 async function boot() {
   $('#logs-title').textContent = `Логи · ${APP_VERSION}`;
+  loadLogs(); renderLogs();
   bindUI();
   logI(`Запуск ${APP_VERSION}`);
   if (!DB.isConfigured()) {
@@ -1100,6 +1324,10 @@ async function boot() {
   try { DB.init(); }
   catch (e) { logE(`Supabase не запустился: ${errMsg(e)}`); showLogin(); $('#login-error').textContent = errMsg(e); return; }
   DB.onSignedOut(showLogin);
+  DB.onNet = setNet;
+  DB.onRetry = (name, n, e) => logW(`Сбой сети, повтор ${n}/3 (${name}): ${errMsg(e)}`);
+  window.addEventListener('offline', () => DB.markDown());
+  window.addEventListener('online', () => DB.ping().catch(() => {}));
   try {
     const s = await DB.getSession();
     if (s) await enterApp(); else showLogin();

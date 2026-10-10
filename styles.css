@@ -25,7 +25,12 @@
   --bg-menu: #1F1F1F;
   --line-menu: #3A3A3A;
   --tri: #8A8A8A;
-  --chip-bg: #AFAFAF;            /* нейтральная капсула */
+  --tri-hover: #BDBDBD;
+  --skeleton: #262626;
+  --skeleton-hi: #303030;
+  --warn: #E5B700;
+  --net-bg: rgba(48, 48, 48, .92);
+  --chip-bg: #C4C4C4;            /* нейтральная капсула */
   --chip-line: #5E5E5E;
   --chip-text: #1B1B1B;
   --status-success: #29C221;     /* база цвета: заливка, контур и текст считаются правилом .chip.tint */
@@ -65,7 +70,7 @@
   --chip-h: 20px;
   --chip-h-sm: 16px;
   --chip-gap: 6px;
-  --select-h: 30px;
+  --select-h: 40px;
   --status-w: 126px;
   --select-gap: 8px;
   --right-gap: 14px;
@@ -73,7 +78,8 @@
   --label-h: 13px;
   --menu-max-h: 240px;
   --menu-gap: 4px;
-  --tab-close: 16px;
+  --tab-close: 14px;
+  --tab-close-icon: 10px;
   --tab-close-gap: 4px;
   --tab-pad-close: 6px;
   --drag-threshold: 5px;         /* на сколько сдвинуть вкладку, чтобы она поехала */
@@ -168,7 +174,9 @@ input { font: inherit; color: inherit; }
 .m-left { flex: none; width: var(--modal-left-w); display: flex; align-items: center; justify-content: center; border-right: 1px solid var(--line-field); }  /* разделитель на всю высоту */
 .m-frame { width: var(--frame-w); height: var(--frame-h); display: flex; align-items: center; justify-content: center; }   /* невидимая область под картинку */
 .m-imgbox { position: relative; }   /* размер задаётся из JS по пропорциям картинки */
-.m-imgbox img { display: block; width: 100%; height: 100%; }
+.m-imgbox img { position: absolute; inset: 0; display: block; width: 100%; height: 100%; }
+#m-img { opacity: 0; transition: opacity .12s; }   /* оригинал проявляется поверх превью, когда загрузился */
+#m-img.ready { opacity: 1; }
 .m-right { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: var(--right-gap); padding: 23px 0 23px 11px; }
 .m-right > * { width: var(--field-w); }
 .m-title-row { flex: none; display: flex; align-items: center; gap: 8px; }
@@ -211,7 +219,10 @@ input { font: inherit; color: inherit; }
 /* ===== ПРАВАЯ ПАНЕЛЬ МОДАЛКИ (v2.0) ===== */
 .scrolly { overscroll-behavior: contain; scrollbar-width: thin; scrollbar-color: #4A4A4A transparent; }
 .save-error { outline: 1px solid var(--error-line); outline-offset: -1px; }
-.tri { display: grid; color: var(--tri); pointer-events: none; }
+.tri { display: grid; color: var(--tri); pointer-events: none; transition: color .15s; }
+.tri svg { transform: rotate(180deg); transition: transform .15s; }   /* список закрыт: треугольник вверх */
+.menu-host.open .tri svg { transform: rotate(0deg); }                 /* список открыт: вниз */
+.select:hover .tri, .tags-host:hover > .tri { color: var(--tri-hover); }
 
 /* капсулы: нейтральная по умолчанию; .tint красит из одной базовой переменной --c */
 .chip { display: inline-flex; align-items: center; justify-content: center; gap: 5px; height: var(--chip-h); max-width: 100%; min-width: 0; padding: 0 8px; border-radius: 999px;
@@ -267,3 +278,18 @@ body.dragging-tab, body.dragging-tab * { cursor: grabbing; user-select: none; }
 .menu-del { display: grid; place-items: center; width: 10px; flex: none; opacity: 0; cursor: pointer; color: var(--text-muted); }
 .menu-item:hover .menu-del { opacity: 1; }
 .menu-del:hover { color: var(--error-text); }
+
+/* ===== v3.0: заглушки, пустое состояние, связь, место, логи ===== */
+.tab-close svg { width: var(--tab-close-icon); height: var(--tab-close-icon); }
+.thumb.loading { background: linear-gradient(100deg, var(--skeleton) 30%, var(--skeleton-hi) 50%, var(--skeleton) 70%) 0 0 / 200% 100%; animation: shimmer 1.3s linear infinite; }
+.thumb.loading img { opacity: 0; }
+.card.skeleton { cursor: default; }
+.cap.sk { width: 55%; background: var(--skeleton); border-radius: 3px; }
+@keyframes shimmer { from { background-position: 200% 0; } to { background-position: -200% 0; } }
+.empty-hint { grid-column: 1 / -1; padding: 80px 0; text-align: center; font-size: 12px; color: var(--text-muted); }
+.grid-sentinel { grid-column: 1 / -1; height: 1px; }
+.net-banner { position: fixed; top: 12px; left: 50%; transform: translateX(-50%); z-index: 350; padding: 6px 14px; border-radius: 999px; background: var(--net-bg); color: var(--text-muted); font-size: 11px; pointer-events: none; }
+.usage.warn { color: var(--warn); }
+.usage.over { color: var(--error-text); }
+.logs-body.only-err .log-INFO, .logs-body.only-err .log-WARN { display: none; }
+.btn.small.active { background: var(--btn-hover); }
