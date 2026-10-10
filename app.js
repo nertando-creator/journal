@@ -1,5 +1,5 @@
 /* app.js — интерфейс. С Supabase общается только через DB (storage.js). */
-const APP_VERSION = 'v1.1';
+const APP_VERSION = 'v2.0';
 const CFG = window.APP_CONFIG;
 const $ = (s, r = document) => r.querySelector(s);
 
@@ -50,6 +50,8 @@ window.addEventListener('unhandledrejection', (e) => logE(`Необработа�
 /* ================= СОСТОЯНИЕ И ИКОНКИ ================= */
 const state = {
   folders: [],
+  tags: [],                    // общие теги (все вкладки)
+  menu: null,                  // открытый выпадающий список
   activeFolder: null,          // null = «Не отсортированные»
   images: [],                  // картинки активной вкладки, новые первыми
   pending: [],                 // заглушки загружаемых файлов
@@ -129,6 +131,8 @@ async function enterApp() {
   logI('Вход выполнен');
   try { state.folders = await DB.listFolders(); }
   catch (e) { logE(errMsg(e)); toast('Не удалось загрузить папки'); }
+  try { state.tags = await DB.listTags(); }
+  catch (e) { logE(errMsg(e)); toast('Не удалось загрузить теги'); }
   renderTabs();
   await loadImages();
 }
@@ -157,6 +161,7 @@ async function setActiveFolder(id) {
   state.images = [];
   renderTabs();
   renderGrid();
+  await settleSaves();       // дописать несохранённое, чтобы перезагрузка не показала старые данные
   await loadImages();
 }
 async function createFolder() {
@@ -430,14 +435,129 @@ async function dupDialog(dups, restCount) {
   return choice;
 }
 
+/* ================= НАДЁЖНОЕ СОХРАНЕНИЕ ================= */
+// Модель «последнего желаемого значения»: на каждое поле картинки (и на каждый тег) хранится актуальное значение,
+// запись идёт по очереди для своего ключа. Каждая запись знает id картинки, поэтому быстрые переключения
+// не могут записать данные не в ту картинку, а повторы и гонки не откатывают новое значение старым.
+const saver = { desired: new Map(), timers: new Map(), queues: new Map(), failed: new Map(), saved: new Set(), inflight: 0, retry: null };
+const FIELD_LABEL = { title: 'название', comment: 'комментарий', status: 'статус', folder_id: 'папка', is_favorite: 'избранное', tag: 'тег' };
+const saveKey = (id, field, tagId) => (field === 'tag' ? `${id}:tag:${tagId}` : `${id}:${field}`);
+
+function queueSave(id, field, value, { delay = 0, tagId = null } = {}) {
+  const key = saveKey(id, field, tagId);
+  const im = state.images.find((x) => x.id === id);
+  let d = saver.desired.get(key);
+  if (!d) { d = { id, field, tagId }; saver.desired.set(key, d); }
+  d.value = value; d.dirty = true; d.name = im ? (im.title || 'Без названия') : id.slice(0, 8);
+  saver.saved.delete(key);
+  clearTimeout(saver.timers.get(key)); saver.timers.delete(key);
+  if (delay > 0) saver.timers.set(key, setTimeout(() => runKey(key), delay)); else runKey(key);
+  refreshSaveUI();
+}
+function runKey(key) {
+  clearTimeout(saver.timers.get(key)); saver.timers.delete(key);
+  const p = (saver.queues.get(key) || Promise.resolve()).then(() => executeKey(key));
+  saver.queues.set(key, p);
+  p.then(() => { if (saver.queues.get(key) === p) saver.queues.delete(key); });
+  return p;
+}
+function persist(d, value) {
+  if (d.field === 'tag') return DB.setImageTag(d.id, d.tagId, value);
+  return DB.updateImage(d.id, { [d.field]: d.field === 'title' ? String(value).trim() : value });
+}
+function saveLogText(d, v) {
+  const n = `«${d.name}»`;
+  if (d.field === 'tag') { const t = state.tags.find((x) => x.id === d.tagId); return `Тег «${t ? t.name : '?'}» ${v ? 'добавлен' : 'снят'}: ${n}`; }
+  if (d.field === 'comment') return `Комментарий сохранён (${String(v).length} симв.): ${n}`;
+  if (d.field === 'status') return `Статус «${statusDef(v).label}»: ${n}`;
+  if (d.field === 'folder_id') return `Папка «${folderName(v)}»: ${n}`;
+  if (d.field === 'is_favorite') return `Избранное ${v ? 'вкл' : 'выкл'}: ${n}`;
+  return `Название сохранено: «${String(v).trim()}»`;
+}
+async function executeKey(key) {         // никогда не бросает: ошибки уходят в логи и в пометку интерфейса
+  const d = saver.desired.get(key);
+  if (!d || !d.dirty) return;
+  const value = d.value; d.dirty = false;
+  saver.inflight++;
+  try {
+    await persist(d, value);
+    const wasFailed = saver.failed.delete(key);
+    if (!d.dirty) { saver.desired.delete(key); saver.saved.add(key); }   // если за время записи значение сменилось, следующая запись уже в очереди
+    logI(saveLogText(d, value));
+    if (wasFailed) logI(`Сохранение восстановилось: ${FIELD_LABEL[d.field]}, «${d.name}»`);
+  } catch (e) {
+    d.dirty = true;
+    const first = !saver.failed.has(key);
+    saver.failed.set(key, errMsg(e));
+    logE(`НЕ СОХРАНЕНО (${FIELD_LABEL[d.field]}, «${d.name}»): ${errMsg(e)}`);
+    if (first) toast(`Не сохранилось: ${FIELD_LABEL[d.field]}. Попробую ещё раз`);
+    scheduleRetry();
+  } finally { saver.inflight--; refreshSaveUI(); }
+}
+function flushAll() { for (const [key, d] of saver.desired) if (d.dirty) runKey(key); }
+function settleSaves() { return Promise.all([...saver.queues.values()]); }
+function scheduleRetry() { if (!saver.retry) saver.retry = setTimeout(() => { saver.retry = null; flushAll(); }, 15000); }
+function hasUnsaved() {
+  return saver.inflight > 0 || saver.failed.size > 0 || [...saver.desired.values()].some((d) => d.dirty) || state.pending.some((p) => !p.error);
+}
+function dropSaves(id) {                 // картинка удалена: её правки больше не нужны
+  for (const key of [...saver.desired.keys()]) {
+    if (!key.startsWith(id + ':')) continue;
+    clearTimeout(saver.timers.get(key)); saver.timers.delete(key);
+    saver.desired.delete(key); saver.failed.delete(key); saver.saved.delete(key);
+  }
+}
+function flushOnUnload() {               // закрытие вкладки: быстрый запрос keepalive, переживает выгрузку страницы
+  for (const d of saver.desired.values()) {
+    if (d.dirty && d.field !== 'tag') DB.patchImageKeepalive(d.id, { [d.field]: d.field === 'title' ? String(d.value).trim() : d.value });
+  }
+}
+// Пометки в интерфейсе: красный контур у поля, которое не сохранилось, и индикатор у комментария
+function refreshSaveUI() {
+  const id = state.modalId;
+  if (!id) return;
+  const bad = (f) => saver.failed.has(saveKey(id, f));
+  const badTag = [...saver.failed.keys()].some((k) => k.startsWith(`${id}:tag:`));
+  $('#m-title').classList.toggle('save-error', bad('title'));
+  $('#m-star').classList.toggle('save-error', bad('is_favorite'));
+  $('#tags-field').classList.toggle('save-error', badTag);
+  $('#status-select').classList.toggle('save-error', bad('status'));
+  $('#folder-select').classList.toggle('save-error', bad('folder_id'));
+  $('#m-comment').classList.toggle('save-error', bad('comment'));
+  const k = saveKey(id, 'comment'), st = $('#comment-state');
+  let text = '', err = false;
+  if (saver.failed.has(k)) { text = 'Ошибка сохранения'; err = true; }
+  else if (saver.desired.has(k)) text = 'Сохраняется…';
+  else if (saver.saved.has(k)) text = 'Сохранено';
+  st.textContent = text; st.classList.toggle('err', err);
+}
+
 /* ================= МОДАЛКА ================= */
 const isModalOpen = () => !$('#modal').hidden;
 const canAdd = () => !$('#app').hidden && !isModalOpen() && !activeDialog;
+const curImage = () => state.images.find((x) => x.id === state.modalId);
 let modalPath = null;
-let titleTimer = null, titleDirty = null;   // автосохранение названия
 
-function cssNum(name) { return parseFloat(getComputedStyle(document.documentElement).getPropertyValue(name)); }
+// Статусы. Чтобы добавить свой: новая переменная цвета в :root + строка здесь. Заливка, контур и текст считаются из цвета правилом .chip.tint в CSS.
+const STATUSES = [
+  { id: 'none', label: 'Без статуса', color: null },
+  { id: 'success', label: 'Успех', color: 'var(--status-success)' },
+  { id: 'fail', label: 'Проигрыш', color: 'var(--status-fail)' }
+];
+const statusDef = (id) => STATUSES.find((s) => s.id === id) || STATUSES[0];
+const TRI_X = '<svg viewBox="0 0 10 10" width="7" height="7"><path d="M1 1l8 8M9 1l-8 8" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>';
+const ICON_CHECK = '<svg viewBox="0 0 12 12" width="10" height="10"><path d="M2 6.5l2.7 2.7L10 3.5" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+
+// Картинка могла быть перенесена в другую папку: она остаётся в списке листания, пока пользователь не уйдёт с неё
+const belongsHere = (im) => (im.folder_id == null ? null : im.folder_id) === state.activeFolder;
+function purgeMoved(exceptId) {
+  const n = state.images.length;
+  state.images = state.images.filter((im) => im.id === exceptId || belongsHere(im));
+  if (state.images.length !== n) renderGrid();
+}
+
 // Модалка всегда 1354×654; уменьшается целиком только если окно меньше. Зум не определяем.
+function cssNum(name) { return parseFloat(getComputedStyle(document.documentElement).getPropertyValue(name)); }
 function fitModal() {
   const W = document.documentElement.clientWidth, H = document.documentElement.clientHeight;
   const mw = cssNum('--modal-w'), mh = cssNum('--modal-h');
@@ -454,28 +574,35 @@ function sizeModalImage(im) {
   box.style.width = Math.round(w * s) + 'px';
   box.style.height = Math.round(h * s) + 'px';
 }
-async function openModal(id) {
+
+function openModal(id) {
   const im = state.images.find((x) => x.id === id);
   if (!im) return;
-  await flushTitle();
+  flushAll();                      // дописать всё несохранённое по предыдущей картинке (запись знает свой id)
+  closeMenu();
   state.modalId = id;
+  purgeMoved(id);
   $('#modal').hidden = false;
   fitModal();
   const img = $('#m-img');
   img.removeAttribute('src'); delete img.dataset.retry;
   sizeModalImage(im);
   modalPath = im.original_path;
-  $('#m-title').value = im.title;
-  $('#m-star').classList.toggle('on', !!im.is_favorite);
+  saver.saved.delete(saveKey(id, 'comment'));
+  fillPanel(im);
   updateNav();
-  await ensureUrls([im.original_path]);
-  if (state.modalId === id) { const c = urlCache.get(im.original_path); if (c) img.src = c.url; }
+  ensureUrls([im.original_path]).then(() => {
+    if (state.modalId !== id) return;
+    const c = urlCache.get(im.original_path);
+    if (c) img.src = c.url;
+  });
 }
 function closeModal() {
   if (!isModalOpen()) return;
-  flushTitle();
+  flushAll(); closeMenu();
   $('#modal').hidden = true;
   state.modalId = null; modalPath = null;
+  purgeMoved(null);                // перенесённые картинки исчезают из сетки этой вкладки
 }
 function updateNav() {
   const i = state.images.findIndex((x) => x.id === state.modalId);
@@ -487,34 +614,187 @@ function step(d) {
   const n = state.images[i + d];
   if (n) openModal(n.id);
 }
+
+/* ---------- правая панель ---------- */
+function fillPanel(im) {
+  $('#m-title').value = im.title || '';
+  $('#m-star').classList.toggle('on', !!im.is_favorite);
+  renderTags(im); renderStatus(im); renderFolder(im);
+  $('#m-comment').value = im.comment || '';
+  refreshSaveUI();
+}
+function chipEl(text, { color = null, sm = false, removeTag = null } = {}) {
+  const c = el('span', 'chip' + (sm ? ' sm' : '') + (color ? ' tint' : ''));
+  if (color) c.style.setProperty('--c', color);
+  c.appendChild(el('span', 't', text));
+  if (removeTag) {
+    const x = el('button', 'chip-x'); x.type = 'button'; x.title = 'Снять тег'; x.innerHTML = TRI_X; x.dataset.tag = removeTag;
+    c.appendChild(x);
+  }
+  return c;
+}
+function renderTags(im) {
+  const f = $('#tags-field'); f.textContent = '';
+  im.tag_ids.map((tid) => state.tags.find((t) => t.id === tid)).filter(Boolean)
+    .sort((a, b) => a.name.localeCompare(b.name, 'ru'))
+    .forEach((t) => f.appendChild(chipEl(t.name, { removeTag: t.id })));
+}
+function renderStatus(im) {
+  const st = statusDef(im.status), v = $('#status-select .sel-val'); v.textContent = '';
+  v.appendChild(chipEl(st.label, { color: st.color, sm: true }));
+}
+function renderFolder(im) {
+  const v = $('#folder-select .sel-val'); v.textContent = '';
+  if (im.folder_id == null) v.appendChild(el('span', 'dash', '—'));
+  else v.appendChild(chipEl(folderName(im.folder_id), { sm: true }));
+}
+
+// Выпадающие списки: один открытый за раз; закрываются кликом снаружи и Esc
+function toggleMenu(name, host, render, cls = '') {
+  if (state.menu && state.menu.name === name) { closeMenu(); return; }
+  closeMenu();
+  const m = el('div', 'menu scrolly ' + cls);
+  render(m);
+  host.appendChild(m);
+  state.menu = { name, host, el: m, render };
+}
+function closeMenu() { if (state.menu) { state.menu.el.remove(); state.menu = null; } }
+function refreshMenu() { if (state.menu) { const m = state.menu.el; m.textContent = ''; state.menu.render(m); } }
+function menuItem(node, selected) {
+  const b = el('button', 'menu-item' + (selected ? ' sel' : '')); b.type = 'button';
+  b.appendChild(node);
+  const ck = el('span', 'menu-check'); ck.innerHTML = selected ? ICON_CHECK : '';
+  b.appendChild(ck);
+  return b;
+}
+function renderTagsMenu(m) {
+  const im = curImage(); if (!im) return;
+  state.tags.forEach((t) => {
+    const r = menuItem(chipEl(t.name), im.tag_ids.includes(t.id));
+    r.onclick = () => toggleTag(t.id);
+    m.appendChild(r);
+  });
+  m.appendChild(addTagRow());
+}
+function addTagRow() {
+  const b = el('button', 'menu-item add', 'Добавить новую'); b.type = 'button';
+  b.addEventListener('click', () => {
+    const inp = el('input', 'menu-input'); inp.type = 'text'; inp.maxLength = 40; inp.placeholder = 'Название тега';
+    b.replaceWith(inp); inp.focus();
+    inp.addEventListener('keydown', async (e) => {
+      if (e.key !== 'Enter') return;
+      e.preventDefault();
+      if (!inp.value.trim()) return;           // пустые теги не создаём
+      await addTag(inp.value);
+      refreshMenu();
+    });
+    inp.addEventListener('blur', () => { if (inp.isConnected) inp.replaceWith(addTagRow()); });
+  });
+  return b;
+}
+function renderStatusMenu(m) {
+  const im = curImage(); if (!im) return;
+  STATUSES.forEach((s) => {
+    const r = menuItem(chipEl(s.label, { color: s.color, sm: true }), (im.status || 'none') === s.id);
+    r.onclick = () => { setStatus(s.id); closeMenu(); };
+    m.appendChild(r);
+  });
+}
+function renderFolderMenu(m) {
+  const im = curImage(); if (!im) return;
+  const cur = im.folder_id == null ? null : im.folder_id;
+  [{ id: null }, ...state.folders].forEach((f) => {
+    const r = menuItem(f.id === null ? el('span', 'dash', '—') : chipEl(f.name, { sm: true }), cur === f.id);
+    r.onclick = () => { setFolder(f.id); closeMenu(); };
+    m.appendChild(r);
+  });
+}
+
+// Изменения полей: сначала сразу в интерфейсе и в памяти, потом запись через saver
 function onTitleInput() {
-  const im = state.images.find((x) => x.id === state.modalId);
-  if (!im) return;
+  const id = state.modalId, im = curImage(); if (!im) return;
   im.title = $('#m-title').value;
-  updateCaption(im.id);
-  titleDirty = { id: im.id, value: im.title };
-  clearTimeout(titleTimer);
-  titleTimer = setTimeout(flushTitle, 600);
+  updateCaption(id);
+  queueSave(id, 'title', im.title, { delay: 600 });
 }
-async function flushTitle() {
-  clearTimeout(titleTimer); titleTimer = null;
-  if (!titleDirty) return;
-  const { id, value } = titleDirty; titleDirty = null;
-  try { await DB.updateImage(id, { title: value.trim() }); logI(`Название сохранено: «${value.trim()}»`); }
-  catch (e) { logE(errMsg(e)); toast('Не удалось сохранить название'); }
-}
-async function toggleStar() {
-  const im = state.images.find((x) => x.id === state.modalId);
-  if (!im) return;
+function toggleStar() {
+  const id = state.modalId, im = curImage(); if (!im) return;
   im.is_favorite = !im.is_favorite;
   $('#m-star').classList.toggle('on', im.is_favorite);
-  try { await DB.updateImage(im.id, { is_favorite: im.is_favorite }); logI(`Избранное ${im.is_favorite ? 'включено' : 'выключено'}: «${im.title}»`); }
-  catch (e) {
-    im.is_favorite = !im.is_favorite;
-    if (state.modalId === im.id) $('#m-star').classList.toggle('on', im.is_favorite);
-    logE(errMsg(e)); toast('Не удалось сохранить избранное');
-  }
+  queueSave(id, 'is_favorite', im.is_favorite);
 }
+function setStatus(v) {
+  const id = state.modalId, im = curImage();
+  if (!im || (im.status || 'none') === v) return;
+  im.status = v; renderStatus(im);
+  queueSave(id, 'status', v);
+}
+function setFolder(v) {
+  const id = state.modalId, im = curImage();
+  if (!im || (im.folder_id == null ? null : im.folder_id) === v) return;
+  im.folder_id = v; renderFolder(im);       // модалка не закрывается, картинка остаётся в списке листания
+  queueSave(id, 'folder_id', v);
+}
+function toggleTag(tagId, forceOn) {
+  const id = state.modalId, im = curImage(); if (!im) return;
+  const has = im.tag_ids.includes(tagId);
+  const on = forceOn === undefined ? !has : forceOn;
+  if (on === has) return;
+  im.tag_ids = on ? [...im.tag_ids, tagId] : im.tag_ids.filter((t) => t !== tagId);
+  renderTags(im); refreshMenu();
+  queueSave(id, 'tag', on, { tagId });
+}
+const sortTags = () => state.tags.sort((a, b) => a.name.localeCompare(b.name, 'ru'));
+async function addTag(raw) {
+  const id = state.modalId;                  // тег ставится на ту картинку, где его вводили, даже если окно успели переключить
+  const name = String(raw).trim().replace(/\s+/g, ' ');
+  if (!name) return;
+  const same = (t) => t.name.toLowerCase() === name.toLowerCase();
+  let tag = state.tags.find(same);
+  if (!tag) {
+    try { tag = await DB.createTag(name); logI(`Создан тег «${name}»`); }
+    catch (e) {
+      if (e.code === '23505') {              // такой уже есть (например, создан с другого устройства)
+        try { state.tags = await DB.listTags(); tag = state.tags.find(same); } catch (e2) { logE(errMsg(e2)); }
+      }
+      if (!tag) { logE(`Тег «${name}» не создан: ${errMsg(e)}`); toast('Не удалось создать тег'); return; }
+    }
+    if (!state.tags.some((t) => t.id === tag.id)) { state.tags.push(tag); sortTags(); }
+  }
+  const im = state.images.find((x) => x.id === id);
+  if (im && !im.tag_ids.includes(tag.id)) {
+    im.tag_ids = [...im.tag_ids, tag.id];
+    queueSave(id, 'tag', true, { tagId: tag.id });
+  }
+  if (state.modalId === id && im) renderTags(im);
+}
+
+// Клик по пункту списка: сам пункт к этому моменту может быть уже убран из DOM, поэтому смотрим путь события, а не e.target
+const inMenu = (e) => e.composedPath().some((n) => n.classList && n.classList.contains('menu'));
+function bindPanel() {
+  $('#tags-host').addEventListener('click', (e) => {
+    if (inMenu(e)) return;
+    const x = e.target.closest('.chip-x');
+    if (x) { toggleTag(x.dataset.tag, false); return; }
+    toggleMenu('tags', $('#tags-host'), renderTagsMenu);
+  });
+  $('#status-host').addEventListener('click', (e) => { if (!inMenu(e)) toggleMenu('status', $('#status-host'), renderStatusMenu, 'match'); });
+  $('#folder-host').addEventListener('click', (e) => { if (!inMenu(e)) toggleMenu('folder', $('#folder-host'), renderFolderMenu, 'match right'); });
+  const c = $('#m-comment');
+  c.addEventListener('input', () => {
+    const id = state.modalId, im = curImage(); if (!im) return;
+    im.comment = c.value;
+    queueSave(id, 'comment', c.value, { delay: 1000 });
+  });
+  c.addEventListener('blur', flushAll);
+  $('#m-title').addEventListener('blur', flushAll);
+  document.addEventListener('mousedown', (e) => { if (state.menu && !state.menu.host.contains(e.target)) closeMenu(); }, true);
+  // закрытие вкладки браузера: быстрая отправка несохранённого + предупреждение, если что-то не записано
+  window.addEventListener('beforeunload', (e) => { flushOnUnload(); if (hasUnsaved()) { e.preventDefault(); e.returnValue = ''; } });
+  window.addEventListener('pagehide', flushOnUnload);
+  document.addEventListener('visibilitychange', () => { if (document.hidden) flushAll(); });
+}
+
 async function deleteImage(id) {
   const im = state.images.find((x) => x.id === id);
   if (!im) return;
@@ -524,15 +804,16 @@ async function deleteImage(id) {
     buttons: [{ id: 'cancel', label: 'Отмена', focus: true }, { id: 'delete', label: 'Удалить', kind: 'danger' }]
   });
   if (choice !== 'delete') return;
-  if (titleDirty && titleDirty.id === id) { clearTimeout(titleTimer); titleDirty = null; }
+  closeMenu();
   const idx = state.images.findIndex((x) => x.id === id);
   try { await DB.deleteImage(im); }
   catch (e) {
     logE(errMsg(e));
-    if (/файлы остались/.test(errMsg(e))) { state.images.splice(idx, 1); renderGrid(); }
+    if (/файлы остались/.test(errMsg(e))) { dropSaves(id); state.images.splice(idx, 1); renderGrid(); }
     toast('Ошибка при удалении, подробности в логах');
     return;
   }
+  dropSaves(id);
   state.images.splice(idx, 1);
   logI(`Удалено навсегда: «${im.title || 'Без названия'}»`);
   renderGrid();
@@ -563,13 +844,14 @@ function bindUI() {
   const ov = $('#modal'); let downOnOverlay = false;
   ov.addEventListener('mousedown', (e) => { downOnOverlay = e.target === ov; });
   ov.addEventListener('click', (e) => { if (downOnOverlay && e.target === ov) closeModal(); });
-  ov.addEventListener('wheel', (e) => e.preventDefault(), { passive: false });
+  ov.addEventListener('wheel', (e) => { if (!e.target.closest('.scrolly')) e.preventDefault(); }, { passive: false });
   // блокировка браузерного зума (Ctrl+колесо, щипок на тачпаде)
   window.addEventListener('wheel', (e) => { if (e.ctrlKey) e.preventDefault(); }, { passive: false });
   $('#nav-prev').onclick = () => step(-1);
   $('#nav-next').onclick = () => step(1);
   $('#m-title').addEventListener('input', onTitleInput);
   $('#m-star').onclick = toggleStar;
+  bindPanel();
   $('#m-trash').onclick = () => deleteImage(state.modalId);
   $('#m-img').addEventListener('error', async () => {
     const img = $('#m-img');
@@ -590,6 +872,7 @@ function bindUI() {
   // клавиши
   window.addEventListener('keydown', (e) => {
     if (activeDialog) { if (e.key === 'Escape') { e.preventDefault(); activeDialog.cancel(); } return; }
+    if (state.menu) { if (e.key === 'Escape') { e.preventDefault(); closeMenu(); } return; }   // Esc: сначала список, потом модалка
     if (isModalOpen()) {
       if (e.key === 'Escape') { e.preventDefault(); closeModal(); }
       else if ((e.key === 'ArrowLeft' || e.key === 'ArrowRight') && !isTyping(e.target)) { e.preventDefault(); step(e.key === 'ArrowLeft' ? -1 : 1); }
