@@ -1,5 +1,5 @@
 /* app.js — интерфейс. С Supabase общается только через DB (storage.js). */
-const APP_VERSION = 'v2.0';
+const APP_VERSION = 'v2.5';
 const CFG = window.APP_CONFIG;
 const $ = (s, r = document) => r.querySelector(s);
 
@@ -52,6 +52,7 @@ const state = {
   folders: [],
   tags: [],                    // общие теги (все вкладки)
   menu: null,                  // открытый выпадающий список
+  loadingImages: false,        // идёт загрузка списка: счётчики пока пустые
   activeFolder: null,          // null = «Не отсортированные»
   images: [],                  // картинки активной вкладки, новые первыми
   pending: [],                 // заглушки загружаемых файлов
@@ -63,6 +64,8 @@ const ICON_FOLDER = '<svg viewBox="0 0 24 24" fill="currentColor"><path d="M10 4
 const ICON_PLUS = '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>';
 const ICON_TRASH = '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18M8 6V4h8v2M6 6l1 14h10l1-14M10 10v7M14 10v7"/></svg>';
 
+const plural = (n, f) => { const a = Math.abs(n) % 100, b = a % 10; return a > 10 && a < 20 ? f[2] : b === 1 ? f[0] : b >= 2 && b <= 4 ? f[1] : f[2]; };
+const ICON_CLOSE = '<svg viewBox="0 0 10 10" width="8" height="8"><path d="M1 1l8 8M9 1l-8 8" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg>';
 const folderName = (id) => id === null || id === undefined ? 'Не отсортированные' : ((state.folders.find((f) => f.id === id) || {}).name || '?');
 const isTyping = (t) => !!t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable);
 const byDateDesc = (a, b) => new Date(b.created_at) - new Date(a.created_at);
@@ -124,6 +127,7 @@ function showLogin() {
   closeModal();
   $('#app').hidden = true;
   $('#login').hidden = false;
+  $('#stats').textContent = '';
 }
 async function enterApp() {
   $('#login').hidden = true;
@@ -152,13 +156,19 @@ function makeTab(id, name) {
   t.innerHTML = ICON_FOLDER + '<span class="tab-name"></span>';
   $('.tab-name', t).textContent = name;
   t.addEventListener('click', () => setActiveFolder(id));
-  if (id !== null) t.addEventListener('dblclick', () => startRename(id)); // «Не отсортированные» не переименовать
+  if (id !== null) {                         // «Не отсортированные»: без переименования и без крестика
+    t.addEventListener('dblclick', () => startRename(id));
+    const x = el('button', 'tab-close'); x.type = 'button'; x.title = 'Удалить папку'; x.innerHTML = ICON_CLOSE;
+    x.addEventListener('click', (e) => { e.stopPropagation(); deleteFolder(id); });
+    t.classList.add('has-close'); t.appendChild(x);
+  }
   return t;
 }
 async function setActiveFolder(id) {
   if (id === state.activeFolder) return;
   state.activeFolder = id;
   state.images = [];
+  state.loadingImages = true;
   renderTabs();
   renderGrid();
   await settleSaves();       // дописать несохранённое, чтобы перезагрузка не показала старые данные
@@ -202,15 +212,18 @@ function startRename(id) {
 async function loadImages() {
   const seq = ++state.loadSeq;
   const folder = state.activeFolder;
+  state.loadingImages = true;
   try {
     const rows = await DB.listImages(folder);
     await ensureUrls(rows.map((r) => r.preview_path));
     if (seq !== state.loadSeq) return;        // успели переключить вкладку
     state.images = rows;
+    state.loadingImages = false;
     renderGrid();
     logI(`Вкладка «${folderName(folder)}»: ${rows.length} шт.`);
   } catch (e) {
     if (seq !== state.loadSeq) return;
+    state.loadingImages = false; updateStats();
     logE(errMsg(e)); toast('Не удалось загрузить картинки');
   }
 }
@@ -218,6 +231,7 @@ function renderGrid() {
   const grid = $('#grid'); grid.textContent = '';
   state.pending.filter((p) => p.folderId === state.activeFolder).forEach((p) => grid.appendChild(pendingCard(p)));
   state.images.forEach((im) => grid.appendChild(imageCard(im)));
+  updateStats();
 }
 function imageCard(im) {
   const c = el('div', 'card'); c.dataset.id = im.id;
@@ -641,7 +655,8 @@ function renderTags(im) {
 }
 function renderStatus(im) {
   const st = statusDef(im.status), v = $('#status-select .sel-val'); v.textContent = '';
-  v.appendChild(chipEl(st.label, { color: st.color, sm: true }));
+  if (st.color) v.appendChild(chipEl(st.label, { color: st.color, sm: true }));
+  else v.appendChild(el('span', 'dash', '—'));      // «без статуса» показываем прочерком
 }
 function renderFolder(im) {
   const v = $('#folder-select .sel-val'); v.textContent = '';
@@ -655,6 +670,7 @@ function toggleMenu(name, host, render, cls = '') {
   closeMenu();
   const m = el('div', 'menu scrolly ' + cls);
   render(m);
+  if (!m.children.length) return;           // нечего показывать (например, папок ещё нет)
   host.appendChild(m);
   state.menu = { name, host, el: m, render };
 }
@@ -670,8 +686,14 @@ function menuItem(node, selected) {
 function renderTagsMenu(m) {
   const im = curImage(); if (!im) return;
   state.tags.forEach((t) => {
-    const r = menuItem(chipEl(t.name), im.tag_ids.includes(t.id));
+    const sel = im.tag_ids.includes(t.id);
+    const r = menuItem(chipEl(t.name), sel);
     r.onclick = () => toggleTag(t.id);
+    if (!sel) {                                // у невыбранных при наведении справа крестик удаления тега
+      const ck = $('.menu-check', r);
+      ck.className = 'menu-del'; ck.title = 'Удалить тег'; ck.innerHTML = TRI_X;
+      ck.addEventListener('click', (e) => { e.stopPropagation(); deleteTag(t); });
+    }
     m.appendChild(r);
   });
   m.appendChild(addTagRow());
@@ -694,18 +716,20 @@ function addTagRow() {
 }
 function renderStatusMenu(m) {
   const im = curImage(); if (!im) return;
-  STATUSES.forEach((s) => {
-    const r = menuItem(chipEl(s.label, { color: s.color, sm: true }), (im.status || 'none') === s.id);
-    r.onclick = () => { setStatus(s.id); closeMenu(); };
+  STATUSES.filter((s) => s.color).forEach((s) => {     // только реальные значения; повторный клик снимает выбор
+    const on = (im.status || 'none') === s.id;
+    const r = menuItem(chipEl(s.label, { color: s.color, sm: true }), on);
+    r.onclick = () => { setStatus(on ? 'none' : s.id); closeMenu(); };
     m.appendChild(r);
   });
 }
 function renderFolderMenu(m) {
   const im = curImage(); if (!im) return;
   const cur = im.folder_id == null ? null : im.folder_id;
-  [{ id: null }, ...state.folders].forEach((f) => {
-    const r = menuItem(f.id === null ? el('span', 'dash', '—') : chipEl(f.name, { sm: true }), cur === f.id);
-    r.onclick = () => { setFolder(f.id); closeMenu(); };
+  state.folders.forEach((f) => {                         // только существующие папки; повторный клик снимает выбор
+    const on = cur === f.id;
+    const r = menuItem(chipEl(f.name, { sm: true }), on);
+    r.onclick = () => { setFolder(on ? null : f.id); closeMenu(); };
     m.appendChild(r);
   });
 }
@@ -728,12 +752,14 @@ function setStatus(v) {
   if (!im || (im.status || 'none') === v) return;
   im.status = v; renderStatus(im);
   queueSave(id, 'status', v);
+  updateStats();
 }
 function setFolder(v) {
   const id = state.modalId, im = curImage();
   if (!im || (im.folder_id == null ? null : im.folder_id) === v) return;
   im.folder_id = v; renderFolder(im);       // модалка не закрывается, картинка остаётся в списке листания
   queueSave(id, 'folder_id', v);
+  updateStats();
 }
 function toggleTag(tagId, forceOn) {
   const id = state.modalId, im = curImage(); if (!im) return;
@@ -823,6 +849,156 @@ async function deleteImage(id) {
   }
 }
 
+/* ================= СЧЁТЧИКИ ================= */
+// Для активной вкладки: всего · успех · проигрыш · процент (успех / (успех + проигрыш), «без статуса» не входят)
+function updateStats() {
+  const box = $('#stats');
+  if (!box) return;
+  if ($('#app').hidden || state.loadingImages) { box.textContent = ''; return; }
+  const list = state.images.filter(belongsHere);     // перенесённые в другую папку уже не считаются
+  const s = list.filter((i) => i.status === 'success').length;
+  const f = list.filter((i) => i.status === 'fail').length;
+  box.textContent = `${list.length} · успех ${s} · проигрыш ${f} · ${s + f ? Math.round((s / (s + f)) * 100) + '%' : '—'}`;
+}
+
+/* ================= ВКЛАДКИ: ПЕРЕТАСКИВАНИЕ ================= */
+// Своё перетаскивание на pointer-событиях: с файлами из проводника (HTML5 drag с типом «Files») не пересекается вообще.
+let orderChain = Promise.resolve();
+let suppressTabClick = false;
+function bindTabDrag() {
+  const box = $('#tabs');
+  // после перетаскивания гасим «хвостовой» клик, чтобы вкладка не переключалась
+  box.addEventListener('click', (e) => { if (suppressTabClick) { e.stopPropagation(); e.preventDefault(); } }, true);
+  box.addEventListener('pointerdown', (e) => {
+    if (e.button !== 0) return;
+    const tab = e.target.closest('.tab');
+    if (!tab || tab.dataset.id === '') return;                       // «Не отсортированные» неподвижна
+    if (tab.querySelector('input') || e.target.closest('.tab-close')) return;   // при переименовании и на крестике не тащим
+    const tabs = [...box.querySelectorAll('.tab')].filter((t) => t.dataset.id !== '');
+    const rects = tabs.map((t) => t.getBoundingClientRect());
+    const from = tabs.indexOf(tab);
+    const gap = parseFloat(getComputedStyle(box).columnGap) || 0;
+    const shift = rects[from].width + gap;
+    const startX = e.clientX;
+    const minDx = rects[0].left - rects[from].left;                  // левее первой папки нельзя
+    const maxDx = rects[rects.length - 1].right - rects[from].right;
+    let dragging = false, to = from;
+    const move = (ev) => {
+      const raw = ev.clientX - startX;
+      if (!dragging) {
+        if (Math.abs(raw) < cssNum('--drag-threshold')) return;
+        dragging = true; tab.classList.add('dragging'); document.body.classList.add('dragging-tab');
+      }
+      const dx = Math.max(minDx, Math.min(maxDx, raw));
+      tab.style.transform = `translateX(${dx}px)`;
+      const center = rects[from].left + rects[from].width / 2 + dx;
+      to = rects.filter((r, j) => j !== from && r.left + r.width / 2 < center).length;
+      tabs.forEach((t, j) => {
+        if (j === from) return;
+        const s = from < to && j > from && j <= to ? -shift : from > to && j < from && j >= to ? shift : 0;
+        t.style.transform = s ? `translateX(${s}px)` : '';
+      });
+    };
+    const up = () => {
+      window.removeEventListener('pointermove', move);
+      window.removeEventListener('pointerup', up);
+      window.removeEventListener('pointercancel', up);
+      document.body.classList.remove('dragging-tab');
+      if (!dragging) return;
+      suppressTabClick = true; setTimeout(() => { suppressTabClick = false; }, 0);
+      if (to !== from) reorderFolders(from, to); else renderTabs();
+    };
+    window.addEventListener('pointermove', move);
+    window.addEventListener('pointerup', up);
+    window.addEventListener('pointercancel', up);
+  });
+}
+function reorderFolders(from, to) {
+  const [m] = state.folders.splice(from, 1);
+  state.folders.splice(to, 0, m);
+  state.folders.forEach((f, i) => { f.position = i + 1; });
+  renderTabs();
+  logI(`Вкладка «${m.name}» перемещена: ${from + 1} → ${to + 1}`);
+  const rows = state.folders.map((f) => ({ id: f.id, position: f.position }));
+  orderChain = orderChain.then(() => DB.saveFolderOrder(rows)).then(() => logI('Порядок вкладок сохранён')).catch(async (e) => {
+    logE(`Порядок вкладок не сохранён: ${errMsg(e)}`);
+    toast('Не удалось сохранить порядок вкладок');
+    try { state.folders = await DB.listFolders(); renderTabs(); } catch (e2) { logE(errMsg(e2)); }   // показываем то, что реально в базе
+  });
+}
+
+/* ================= УДАЛЕНИЕ ПАПКИ ================= */
+const deletingFolders = new Set();
+async function deleteFolder(id) {
+  const f = state.folders.find((x) => x.id === id);
+  if (!f || deletingFolders.has(id)) return;
+  if (state.pending.some((p) => p.folderId === id && !p.error)) { toast('В эту папку идёт загрузка. Дождись окончания'); return; }
+  await settleSaves();
+  let count;
+  try { count = await DB.countImages(id); }
+  catch (e) { logE(errMsg(e)); toast('Не удалось посчитать картинки в папке'); return; }
+  const one = count % 10 === 1 && count % 100 !== 11;
+  const text = count === 0
+    ? `Папка «${f.name}» пустая.`
+    : `В папке «${f.name}» ${count} ${plural(count, ['картинка', 'картинки', 'картинок'])}, ${one ? 'она будет удалена' : 'они будут удалены'} навсегда.`;
+  const choice = await openDialog({
+    title: 'Удалить папку?', body: el('p', '', text),
+    buttons: [{ id: 'cancel', label: 'Отмена', focus: true }, { id: 'delete', label: 'Удалить', kind: 'danger' }]
+  });
+  if (choice !== 'delete') return;
+  deletingFolders.add(id);
+  logI(`Удаление папки «${f.name}» (картинок: ${count})…`);
+  let res;
+  try { res = await DB.deleteFolderWithImages(id); }
+  catch (e) {
+    deletingFolders.delete(id);
+    logE(`Папка «${f.name}» не удалена: ${errMsg(e)}`);
+    toast('Не удалось удалить папку, подробности в «Логи»');
+    return;
+  }
+  deletingFolders.delete(id);
+  res.failures.forEach((m) => logE(`Папка «${f.name}»: ${m}`));
+  if (res.folderDeleted) {
+    state.folders = state.folders.filter((x) => x.id !== id);
+    logI(`Папка «${f.name}» удалена: картинок ${res.deleted}, файлов в хранилище ${res.files}`);
+    if (state.activeFolder === id) await setActiveFolder(null); else renderTabs();
+  } else {
+    logE(`Папка «${f.name}» удалена не полностью: картинок удалено ${res.deleted} из ${res.total}, сама папка осталась`);
+    toast('Папка удалена не полностью, подробности в «Логи»');
+    renderTabs();
+    if (state.activeFolder === id) await loadImages();
+  }
+}
+
+/* ================= УДАЛЕНИЕ ТЕГА ================= */
+async function deleteTag(t) {
+  await settleSaves();                       // чтобы только что поставленные теги попали в подсчёт
+  let n;
+  try { n = await DB.countTagUsage(t.id); }
+  catch (e) { logE(errMsg(e)); toast('Не удалось проверить, где используется тег'); return; }
+  if (n > 1) {
+    const choice = await openDialog({
+      title: 'Удалить тег?',
+      body: el('p', '', `Тег «${t.name}» используется в ${n} ${n % 10 === 1 && n % 100 !== 11 ? 'картинке' : 'картинках'}. Удалить?`),
+      buttons: [{ id: 'cancel', label: 'Отмена', focus: true }, { id: 'delete', label: 'Удалить', kind: 'danger' }]
+    });
+    if (choice !== 'delete') return;
+  }
+  try { await DB.deleteTag(t.id); }
+  catch (e) { logE(`Тег «${t.name}» не удалён: ${errMsg(e)}`); toast('Не удалось удалить тег'); return; }
+  state.tags = state.tags.filter((x) => x.id !== t.id);
+  state.images.forEach((im) => { im.tag_ids = im.tag_ids.filter((x) => x !== t.id); });
+  for (const key of [...saver.desired.keys()]) {            // отложенные записи про этот тег больше не нужны
+    if (!key.endsWith(`:tag:${t.id}`)) continue;
+    clearTimeout(saver.timers.get(key)); saver.timers.delete(key);
+    saver.desired.delete(key); saver.failed.delete(key); saver.saved.delete(key);
+  }
+  const cur = curImage();
+  if (cur && isModalOpen()) renderTags(cur);
+  refreshMenu(); refreshSaveUI();
+  logI(`Тег «${t.name}» удалён (стоял на картинках: ${n})`);
+}
+
 /* ================= СОБЫТИЯ ================= */
 function bindUI() {
   // логи
@@ -852,6 +1028,7 @@ function bindUI() {
   $('#m-title').addEventListener('input', onTitleInput);
   $('#m-star').onclick = toggleStar;
   bindPanel();
+  bindTabDrag();
   $('#m-trash').onclick = () => deleteImage(state.modalId);
   $('#m-img').addEventListener('error', async () => {
     const img = $('#m-img');

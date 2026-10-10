@@ -40,6 +40,12 @@
     return m ? m[1] : s.replace(/\/+$/, '');
   }
 
+  async function countImagesOf(folderId) {
+    const { count, error } = await sb.from('images').select('id', { count: 'exact', head: true }).eq('folder_id', folderId);
+    if (error) fail('Папка: подсчёт картинок', error);
+    return count || 0;
+  }
+
   window.DB = {
     // ---------- старт ----------
     isConfigured() {
@@ -164,11 +170,65 @@
       } catch { return false; }
     },
 
+    // ---------- порядок вкладок и удаление папки ----------
+    async saveFolderOrder(rows) {            // обновляем только position, чтобы не затереть переименование
+      const res = await Promise.all(rows.map((r) => sb.from('folders').update({ position: r.position }).eq('id', r.id)));
+      const bad = res.find((r) => r.error);
+      if (bad) fail('Папки: порядок', bad.error);
+    },
+    countImages(folderId) { return countImagesOf(folderId); },
+    // Удаляет картинки папки (файлы в хранилище, потом записи), и только если не осталось ни одной, саму папку.
+    // Не бросает ошибок по пачкам: возвращает отчёт, чтобы ничего не терялось молча.
+    async deleteFolderWithImages(folderId) {
+      const imgs = [];
+      for (let from = 0; ; from += 1000) {
+        const { data, error } = await sb.from('images').select('id,original_path,preview_path').eq('folder_id', folderId).order('created_at').range(from, from + 999);
+        if (error) fail('Папка: список картинок', error);
+        imgs.push(...data);
+        if (data.length < 1000) break;
+      }
+      const res = { total: imgs.length, deleted: 0, files: 0, failures: [], folderDeleted: false };
+      const CH = 20;
+      for (let i = 0; i < imgs.length; i += CH) {
+        const chunk = imgs.slice(i, i + CH);
+        const paths = chunk.flatMap((x) => [x.original_path, x.preview_path]).filter(Boolean);
+        try {
+          const r = await sb.storage.from(cfg.BUCKET).remove(paths);
+          if (r.error) fail(`Хранилище: удаление файлов (пачка ${i / CH + 1}, ${paths.length} шт.)`, r.error);
+          res.files += (r.data || []).length;
+          const { error } = await sb.from('images').delete().in('id', chunk.map((x) => x.id));
+          if (error) fail(`База: удаление записей (пачка ${i / CH + 1}, ${chunk.length} шт.)`, error);
+          res.deleted += chunk.length;
+        } catch (e) { res.failures.push(e.message); }
+      }
+      if (!res.failures.length) {
+        try {
+          const left = await countImagesOf(folderId);
+          if (left > 0) res.failures.push(`в папке осталось картинок: ${left} (добавлены во время удаления?)`);
+        } catch (e) { res.failures.push(e.message); }
+      }
+      if (!res.failures.length) {
+        const { error } = await sb.from('folders').delete().eq('id', folderId);
+        if (error) res.failures.push(describe(error)); else res.folderDeleted = true;
+      }
+      return res;
+    },
+
     // ---------- теги ----------
     async listTags() {
       const { data, error } = await sb.from('tags').select('*').order('name');
       if (error) fail('Теги: загрузка', error);
       return data;
+    },
+    async countTagUsage(tagId) {
+      const { count, error } = await sb.from('image_tags').select('image_id', { count: 'exact', head: true }).eq('tag_id', tagId);
+      if (error) fail('Тег: подсчёт использования', error);
+      return count || 0;
+    },
+    // Связи image_tags удаляются каскадом (on delete cascade в supabase_setup.sql)
+    async deleteTag(tagId) {
+      const { error } = await sb.from('tags').delete().eq('id', tagId);
+      if (error) fail('Тег: удаление', error);
     },
     async createTag(name) {
       const { data, error } = await sb.from('tags').insert({ name }).select().single();
