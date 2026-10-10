@@ -4,8 +4,30 @@
   const cfg = window.APP_CONFIG;
   let sb = null;
 
+  // Настоящий текст ошибки Supabase: сообщение, имя, HTTP-статус, код, детали, подсказка
+  function describe(error) {
+    if (!error) return 'неизвестная ошибка';
+    if (typeof error === 'string') return error;
+    const msg = error.message || String(error);
+    const meta = [];
+    if (error.name && error.name !== 'Error' && !msg.includes(error.name)) meta.push(error.name);
+    if (error.status) meta.push('HTTP ' + error.status);
+    if (error.statusCode) meta.push('HTTP ' + error.statusCode);
+    if (error.code) meta.push('код ' + error.code);
+    let out = msg + (meta.length ? ` [${meta.join(', ')}]` : '');
+    if (error.details) out += ' | ' + error.details;
+    if (error.hint) out += ' | подсказка: ' + error.hint;
+    return out;
+  }
   function fail(ctx, error) {
-    throw new Error(`${ctx}: ${(error && error.message) || error}`);
+    throw new Error(`${ctx}: ${describe(error)}`);
+  }
+  // https://xxxx.supabase.co/rest/v1/ → https://xxxx.supabase.co
+  function cleanUrl(u) {
+    let s = String(u || '').trim();
+    if (!/^https?:\/\//i.test(s)) s = 'https://' + s;
+    const m = s.match(/^(https?:\/\/[^\/?#:]+?\.supabase\.co)(?=[\/?#:]|$)/i);
+    return m ? m[1] : s.replace(/\/+$/, '');
   }
 
   window.DB = {
@@ -13,7 +35,8 @@
     isConfigured() {
       return !!cfg && !/ВСТАВЬ/.test(String(cfg.SUPABASE_URL) + String(cfg.SUPABASE_KEY));
     },
-    init() { sb = window.supabase.createClient(cfg.SUPABASE_URL, cfg.SUPABASE_KEY); },
+    supabaseUrl() { return cleanUrl(cfg.SUPABASE_URL); },
+    init() { sb = window.supabase.createClient(cleanUrl(cfg.SUPABASE_URL), String(cfg.SUPABASE_KEY).trim()); },
     ready() { return !!sb; },
 
     // ---------- вход ----------

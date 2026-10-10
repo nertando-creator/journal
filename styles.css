@@ -38,13 +38,17 @@
   --modal-w: 1354px;
   --modal-h: 654px;
   --modal-left-w: 979px;
-  --modal-right-w: 375px;
   --frame-w: 944px;
   --frame-h: 609px;
   --field-w: 354px;
   --title-w: 313px;
   --title-h: 36px;
-  --arrow-space: 72px;           /* место под стрелки по бокам модалки */
+  --arrow-space: 40px;           /* минимальный зазор окно → модалка под стрелки */
+  --nav-w: 32px;
+  --nav-h: 64px;
+  --arrow: rgba(232, 232, 232, .55);
+  --arrow-hover: #FFFFFF;
+  --arrow-off: rgba(232, 232, 232, .18);
 
   /* --- Радиусы --- */
   --r-card: 4px;
@@ -97,19 +101,19 @@ input { font: inherit; color: inherit; }
 .upload-status { font-size: 11px; color: var(--text-muted); padding-bottom: 12px; white-space: nowrap; }
 
 /* --- подложка и сетка --- */
-.panel { background: var(--bg-panel); padding: var(--panel-pad); min-height: 60vh; border-radius: 0 var(--r-tab) var(--r-tab) var(--r-tab); }
+.panel { padding: var(--panel-pad); min-height: 60vh; }   /* без фона: подложки под сеткой нет */
 .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(var(--card-min), 1fr)); column-gap: var(--card-gap); row-gap: var(--row-gap); }
 .card { min-width: 0; cursor: pointer; }
 .thumb { position: relative; aspect-ratio: var(--card-ratio); border-radius: var(--r-card); overflow: hidden; }
-/* картинка вписывается и не растёт больше 1.5× от натурального размера (--w/--h задаются из JS) */
-.thumb img, .m-frame img { position: absolute; inset: 0; margin: auto; display: block; object-fit: contain;
+/* сетка: вписывается без искажений, по центру по горизонтали, прижата ко дну рамки; не больше 1.5× натурального (--w/--h из JS) */
+.thumb img { position: absolute; left: 0; right: 0; bottom: 0; margin: 0 auto; display: block; object-fit: contain; object-position: center bottom;
   width: min(100%, calc(var(--w) * 1.5px)); height: min(100%, calc(var(--h) * 1.5px)); }
 .thumb::after { content: ""; position: absolute; inset: 0; border: 1px solid transparent; border-radius: inherit; pointer-events: none; }
 .card:hover .thumb::after { border-color: var(--card-hover); }
 .cap { margin-top: var(--cap-gap); font-size: var(--fs-cap); line-height: var(--cap-h); height: var(--cap-h); color: var(--text-muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 
 .trash { position: absolute; top: 8px; right: 8px; z-index: 2; width: 28px; height: 28px; border-radius: var(--r-field); background: rgba(0, 0, 0, .6); display: grid; place-items: center; opacity: 0; transition: opacity .12s; }
-.card:hover .trash, .m-frame:hover .trash { opacity: 1; }
+.card:hover .trash, .m-imgbox:hover .trash { opacity: 1; }
 .trash:hover { background: var(--danger); }
 
 .card.pending { cursor: default; }
@@ -119,21 +123,24 @@ input { font: inherit; color: inherit; }
 
 /* ===== МОДАЛКА ===== */
 .overlay { position: fixed; inset: 0; background: var(--backdrop); z-index: 100; }
-.modal { position: absolute; left: 50%; top: 50%; width: var(--modal-w); height: var(--modal-h); background: var(--bg-modal); border-radius: var(--r-modal); display: flex; overflow: hidden;
+.modal { position: absolute; left: 50%; top: 50%; width: var(--modal-w); height: var(--modal-h); background: var(--bg-modal); border: 1px solid var(--line-field); border-radius: var(--r-modal); display: flex; overflow: hidden;
   transform: translate(-50%, -50%) scale(var(--ms, 1)); }
-.m-left { flex: none; width: var(--modal-left-w); display: flex; align-items: center; justify-content: center; }
-.m-frame { position: relative; width: var(--frame-w); height: var(--frame-h); border: 1px solid var(--line-field); border-radius: var(--r-field); overflow: hidden; }
-.m-right { flex: none; width: var(--modal-right-w); padding: 23px 0 0 11px; }
+.m-left { flex: none; width: var(--modal-left-w); display: flex; align-items: center; justify-content: center; border-right: 1px solid var(--line-field); }  /* разделитель на всю высоту */
+.m-frame { width: var(--frame-w); height: var(--frame-h); display: flex; align-items: center; justify-content: center; }   /* невидимая область под картинку */
+.m-imgbox { position: relative; }   /* размер задаётся из JS по пропорциям картинки */
+.m-imgbox img { display: block; width: 100%; height: 100%; }
+.m-right { flex: 1; min-width: 0; padding: 23px 0 0 11px; }
 .m-title-row { width: var(--field-w); display: flex; align-items: center; gap: 8px; }
 .m-title { width: var(--title-w); height: var(--title-h); padding: 0 12px; background: var(--bg-field); border: 1px solid var(--line-field); border-radius: var(--r-field); font-size: var(--fs-title); outline: none; }
 .star { flex: 1; height: var(--title-h); display: grid; place-items: center; color: var(--star-off); }
 .star.on { color: var(--star-on); }
 
-.nav { position: fixed; top: 50%; transform: translateY(-50%); z-index: 101; width: 48px; height: 48px; border-radius: 50%; background: rgba(255, 255, 255, .08); display: grid; place-items: center; }
-.nav:hover:not(:disabled) { background: rgba(255, 255, 255, .16); }
-.nav:disabled { opacity: .25; cursor: default; }
-.nav-prev { left: 12px; }
-.nav-next { right: 12px; }
+.nav { position: fixed; top: 50%; transform: translateY(-50%); z-index: 101; width: var(--nav-w); height: var(--nav-h); display: grid; place-items: center; color: var(--arrow); }
+.nav:hover:not(:disabled) { color: var(--arrow-hover); }
+.nav:disabled { color: var(--arrow-off); cursor: default; }
+/* --nav-x: расстояние от края окна до центра стрелки (середина между краем окна и краем модалки), считает JS */
+.nav-prev { left: calc(var(--nav-x, 40px) - var(--nav-w) / 2); }
+.nav-next { right: calc(var(--nav-x, 40px) - var(--nav-w) / 2); }
 
 /* ===== ДИАЛОГ ===== */
 .dialog-overlay { z-index: 150; display: grid; place-items: center; }

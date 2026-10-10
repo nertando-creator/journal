@@ -1,5 +1,5 @@
 /* app.js — интерфейс. С Supabase общается только через DB (storage.js). */
-const APP_VERSION = 'v1.0';
+const APP_VERSION = 'v1.1';
 const CFG = window.APP_CONFIG;
 const $ = (s, r = document) => r.querySelector(s);
 
@@ -19,7 +19,11 @@ function log(level, msg) {
 const logI = (m) => log('INFO', m);
 const logW = (m) => log('WARN', m);
 const logE = (m) => log('ERR', m);
-const errMsg = (e) => (e && e.message) || String(e);
+const errMsg = (e) => {
+  if (!e) return 'неизвестная ошибка';
+  const m = e.message || String(e);
+  return e.name && e.name !== 'Error' && !m.includes(e.name) ? `${e.name}: ${m}` : m;
+};
 
 function toast(msg) {
   const t = document.createElement('div');
@@ -433,9 +437,22 @@ let modalPath = null;
 let titleTimer = null, titleDirty = null;   // автосохранение названия
 
 function cssNum(name) { return parseFloat(getComputedStyle(document.documentElement).getPropertyValue(name)); }
+// Модалка всегда 1354×654; уменьшается целиком только если окно меньше. Зум не определяем.
 function fitModal() {
-  const k = Math.min(1, (innerWidth - 2 * cssNum('--arrow-space')) / cssNum('--modal-w'), (innerHeight - 32) / cssNum('--modal-h'));
-  $('#modal-box').style.setProperty('--ms', Math.max(0.2, k));
+  const W = document.documentElement.clientWidth, H = document.documentElement.clientHeight;
+  const mw = cssNum('--modal-w'), mh = cssNum('--modal-h');
+  const k = Math.max(0.2, Math.min(1, (W - 2 * cssNum('--arrow-space')) / mw, (H - 32) / mh));
+  $('#modal-box').style.setProperty('--ms', k);
+  // стрелки: посередине между краем окна и краем модалки
+  $('#modal').style.setProperty('--nav-x', ((W - mw * k) / 4) + 'px');
+}
+// Невидимая область 944×609: картинка вписывается, центрируется, не больше 1.5× натурального
+function sizeModalImage(im) {
+  const w = im.width || 1, h = im.height || 1;
+  const s = Math.min(cssNum('--frame-w') / w, cssNum('--frame-h') / h, 1.5);
+  const box = $('#m-imgbox');
+  box.style.width = Math.round(w * s) + 'px';
+  box.style.height = Math.round(h * s) + 'px';
 }
 async function openModal(id) {
   const im = state.images.find((x) => x.id === id);
@@ -446,8 +463,7 @@ async function openModal(id) {
   fitModal();
   const img = $('#m-img');
   img.removeAttribute('src'); delete img.dataset.retry;
-  img.style.setProperty('--w', im.width || 1);
-  img.style.setProperty('--h', im.height || 1);
+  sizeModalImage(im);
   modalPath = im.original_path;
   $('#m-title').value = im.title;
   $('#m-star').classList.toggle('on', !!im.is_favorite);
@@ -539,7 +555,7 @@ function bindUI() {
     if (!DB.ready()) return;
     const btn = $('#login-btn'); btn.disabled = true; $('#login-error').textContent = '';
     try { await DB.signIn($('#login-email').value.trim(), $('#login-pass').value); await enterApp(); }
-    catch (err) { $('#login-error').textContent = 'Не удалось войти. Проверь почту и пароль.'; logE(errMsg(err)); }
+    catch (err) { $('#login-error').textContent = errMsg(err); logE(`Вход не удался: ${errMsg(err)}`); }
     finally { btn.disabled = false; }
   });
 
@@ -548,6 +564,8 @@ function bindUI() {
   ov.addEventListener('mousedown', (e) => { downOnOverlay = e.target === ov; });
   ov.addEventListener('click', (e) => { if (downOnOverlay && e.target === ov) closeModal(); });
   ov.addEventListener('wheel', (e) => e.preventDefault(), { passive: false });
+  // блокировка браузерного зума (Ctrl+колесо, щипок на тачпаде)
+  window.addEventListener('wheel', (e) => { if (e.ctrlKey) e.preventDefault(); }, { passive: false });
   $('#nav-prev').onclick = () => step(-1);
   $('#nav-next').onclick = () => step(1);
   $('#m-title').addEventListener('input', onTitleInput);
@@ -616,7 +634,11 @@ async function boot() {
     logE('Supabase CDN не загрузился');
     return;
   }
-  DB.init();
+  const rawUrl = String(CFG.SUPABASE_URL).trim(), url = DB.supabaseUrl();
+  if (rawUrl !== url) logW(`URL Supabase очищен: ${rawUrl} → ${url}`);
+  logI(`Supabase: ${url}`);
+  try { DB.init(); }
+  catch (e) { logE(`Supabase не запустился: ${errMsg(e)}`); showLogin(); $('#login-error').textContent = errMsg(e); return; }
   DB.onSignedOut(showLogin);
   try {
     const s = await DB.getSession();
