@@ -13,7 +13,11 @@
   --mod-market-rsi: #B48CF2;
   --mod-market-rsi-level: #5C5C5C;
   --mod-market-line: #5B9BF0;            /* трендовая линия */
+  --mod-market-line-hover: #8DB9F7;      /* линия под курсором */
   --mod-market-line-active: #FFFFFF;     /* выбранная линия */
+  --mod-market-line-w: 1;                /* толщина линии, px (число) */
+  --mod-market-line-w-hover: 2;
+  --mod-market-line-w-active: 3;
   --mod-market-live: var(--status-success);
   --mod-market-wait: var(--warn);
   --mod-market-off: #D14343;

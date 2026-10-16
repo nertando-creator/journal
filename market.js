@@ -7,6 +7,7 @@
 
   /* ================= НАСТРОЙКИ (одной строкой) ================= */
   const KLINE_VERSIONS = ['9.8.10', '9.8.9'];                      // KLineChart v9, версии закреплены; вторая — запасная
+  const BAR_SPACE_MIN = 0.5;                                        // мин. ширина свечи в px (в библиотеке зашито 1); 0.5 = примерно вдвое больше свечей на экране
   const KLINE_PATHS = ['/dist/umd/klinecharts.min.js', '/dist/klinecharts.min.js'];   // у v9 путь файла проверяется по очереди
   const REST_BASE = 'https://fapi.binance.com';
   const WS_BASE = 'wss://fstream.binance.com/market/ws/';          // с 2026 свечи только на /market (старый /ws отключается)
@@ -182,20 +183,29 @@
   };
 
   /* ================= ГРАФИК (KLineChart v9) — единственное место, знающее библиотеку ================= */
-  const Chart = {
-    chart: null, selectedId: null, drawingId: null, onToolEnd: null, loadMoreHandler: null,
+  const reportTimes = new Map();
+  function report(where, e) {              // ошибка в коде библиотеки или в наших колбэках: текст + стек, одинаковая не чаще раза в минуту
+    const msg = msgOf(e), key = where + '|' + msg, now = Date.now();
+    if (now - (reportTimes.get(key) || 0) < 60000) return;
+    reportTimes.set(key, now);
+    const st = e && e.stack ? '\n' + String(e.stack).split('\n').slice(0, 6).join('\n') : '';
+    logE(L(`ошибка (${where}): ${msg}${st}`));
+  }
+  const safe = (where, fn, fallback) => { try { return fn(); } catch (e) { report(where, e); return fallback; } };
+  const libReady = () => !!(window.klinecharts && typeof window.klinecharts.init === 'function');
 
+  const Chart = {
+    chart: null, container: null, loadMoreHandler: null, colors: {},
+    selectedId: null, hoverId: null, drawingId: null, tool: null, ids: new Map(), seq: 0, onToolChange: null,
+
+    /* --- загрузка библиотеки --- */
     loadLib() {
-      if (window.klinecharts && typeof window.klinecharts.init === 'function') return Promise.resolve();
+      if (libReady()) return Promise.resolve();
       const urls = [];
       KLINE_VERSIONS.forEach((v) => KLINE_PATHS.forEach((p) => urls.push(`https://cdn.jsdelivr.net/npm/klinecharts@${v}${p}`)));
       return (async () => {
         for (const u of urls) {
-          const ok = await new Promise((res) => {
-            const s = document.createElement('script'); s.src = u; s.onload = () => res(true); s.onerror = () => { s.remove(); res(false); };
-            document.head.appendChild(s);
-          });
-          if (ok && window.klinecharts && typeof window.klinecharts.init === 'function') {
+          if ((await this._loadPatched(u)) || (await this._loadTag(u))) {
             let ver = ''; try { ver = typeof klinecharts.version === 'function' ? ' v' + klinecharts.version() : ''; } catch { /* ок */ }
             logI(L(`библиотека загружена: ${u}${ver}`)); return;
           }
@@ -204,11 +214,33 @@
         throw mkErr('LIB', 'KLineChart не загрузился ни по одному адресу. Проверь интернет');
       })();
     },
+    // Предел сжатия свечи зашит в v9 (MIN: 1 px) и снаружи не меняется. Скачиваем файл сами, заменяем число и запускаем как свой скрипт
+    // (это же делает ошибки библиотеки читаемыми: скрипт не «чужой»). Не получилось — обычный <script crossorigin>.
+    async _loadPatched(u) {
+      try {
+        const r = await fetch(u); if (!r.ok) return false;
+        const src = await r.text(), re = /MIN:\s*1\s*,\s*MAX:\s*50/;
+        if (!re.test(src)) { logW(L('в файле библиотеки не найден предел сжатия: запас отдаления не расширен')); return false; }
+        const s = document.createElement('script');
+        s.textContent = src.replace(re, `MIN:${BAR_SPACE_MIN},MAX:50`) + '\n//# sourceURL=klinecharts-patched.js';
+        document.head.appendChild(s);
+        if (!libReady()) return false;
+        logI(L(`предел сжатия свечи изменён: ${BAR_SPACE_MIN} px вместо 1`)); return true;
+      } catch (e) { logW(L(`загрузка с правкой не удалась (${msgOf(e)}), пробую обычным скриптом`)); return false; }
+    },
+    _loadTag(u) {
+      return new Promise((res) => {
+        const s = document.createElement('script'); s.src = u; s.crossOrigin = 'anonymous';
+        s.onload = () => res(libReady()); s.onerror = () => { s.remove(); res(false); };
+        document.head.appendChild(s);
+      });
+    },
 
+    /* --- оформление --- */
     styles() {
       const c = cssVar, txt = c('--mod-market-axis-text'), line = c('--mod-market-axis-line');
-      const axis = { axisLine: { color: line }, tickLine: { color: line }, tickText: { color: txt } };
-      const cross = (dir) => ({ line: { color: c('--mod-market-crosshair') }, text: { backgroundColor: c('--mod-market-crosshair-bg'), borderColor: c('--mod-market-crosshair-bg') } });
+      const axis = () => ({ axisLine: { color: line }, tickLine: { color: line }, tickText: { color: txt } });
+      const cross = () => ({ line: { color: c('--mod-market-crosshair') }, text: { backgroundColor: c('--mod-market-crosshair-bg'), borderColor: c('--mod-market-crosshair-bg') } });
       return {
         grid: { horizontal: { color: c('--mod-market-grid') }, vertical: { color: c('--mod-market-grid') } },
         candle: {
@@ -219,78 +251,117 @@
           tooltip: { text: { color: txt } },
         },
         indicator: { tooltip: { text: { color: txt } }, lastValueMark: { show: false } },
-        xAxis: axis, yAxis: axis,
+        xAxis: axis(), yAxis: axis(),
         separator: { color: line },
         crosshair: { horizontal: cross(), vertical: cross() },
       };
     },
+    readColors() {
+      this.colors = {
+        level: cssVar('--mod-market-rsi-level'), rsi: cssVar('--mod-market-rsi'),
+        line: cssVar('--mod-market-line'), hover: cssVar('--mod-market-line-hover'), active: cssVar('--mod-market-line-active'),
+        w: cssNum('--mod-market-line-w', 1), wHover: cssNum('--mod-market-line-w-hover', 2), wActive: cssNum('--mod-market-line-w-active', 3),
+      };
+    },
 
+    /* --- RSI: одна линия + пунктирные уровни 30/70 (рисуем сами), шкала фиксирована 0–100 --- */
     registerRsi() {
-      const k = window.klinecharts;
-      k.registerIndicator({
-        name: 'MKT_RSI', shortName: 'RSI', calcParams: [RSI_PERIOD], precision: 2,
-        figures: [{ key: 'rsi', title: 'RSI: ', type: 'line' }, { key: 'hi', title: '70: ', type: 'line' }, { key: 'lo', title: '30: ', type: 'line' }],
-        calc: (dataList, ind) => {                       // RSI по Уайлдеру (как в TradingView/Binance)
+      const self = this;
+      window.klinecharts.registerIndicator({
+        name: 'MKT_RSI', shortName: 'RSI', calcParams: [RSI_PERIOD], precision: 2, minValue: 0, maxValue: 100,
+        figures: [{ key: 'rsi', title: 'RSI: ', type: 'line' }],
+        calc: (dataList, ind) => safe('расчёт RSI', () => {          // RSI по Уайлдеру (как в TradingView/Binance)
           const p = (ind.calcParams && ind.calcParams[0]) || RSI_PERIOD;
           const out = new Array(dataList.length); let ag = 0, al = 0;
           const val = () => (ag === 0 && al === 0 ? 50 : al === 0 ? 100 : 100 - 100 / (1 + ag / al));
           for (let i = 0; i < dataList.length; i++) {
-            out[i] = { hi: 70, lo: 30 };
+            out[i] = {};
             if (i === 0) continue;
             const d = dataList[i].close - dataList[i - 1].close, g = d > 0 ? d : 0, l = d < 0 ? -d : 0;
             if (i <= p) { ag += g; al += l; if (i === p) { ag /= p; al /= p; out[i].rsi = val(); } }
             else { ag = (ag * (p - 1) + g) / p; al = (al * (p - 1) + l) / p; out[i].rsi = val(); }
           }
           return out;
+        }, dataList.map(() => ({}))),
+        draw: ({ ctx, bounding, yAxis }) => {
+          safe('уровни RSI', () => {
+            ctx.save(); ctx.setLineDash([4, 4]); ctx.lineWidth = 1; ctx.strokeStyle = self.colors.level;
+            [30, 70].forEach((v) => { const y = Math.round(yAxis.convertToPixel(v)) + 0.5; ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(bounding.width, y); ctx.stroke(); });
+            ctx.restore();
+          });
+          return false;                                               // линию RSI рисует сама библиотека
         },
       });
     },
 
+    /* --- создание/пересоздание графика (пересоздание = шкалы снова автоматические) --- */
     create(container, loadMoreHandler) {
+      this.container = container; this.loadMoreHandler = loadMoreHandler;
+      this.readColors();
+      try { this.registerRsi(); } catch (e) { report('регистрация RSI', e); }
+      this.build();
+    },
+    build() {
       const k = window.klinecharts;
-      try { this.registerRsi(); } catch (e) { logE(L(`RSI не зарегистрирован: ${msgOf(e)}`)); }
-      this.chart = k.init(container, { styles: this.styles() });
-      if (!this.chart) throw mkErr('LIB', 'klinecharts.init вернул пустоту');
-      try { this.chart.setTimezone(Intl.DateTimeFormat().resolvedOptions().timeZone); } catch { /* по умолчанию и так местное время */ }
-      try {
-        const lv = cssVar('--mod-market-rsi-level');
-        this.chart.createIndicator({ name: 'MKT_RSI', styles: { lines: [
-          { color: cssVar('--mod-market-rsi'), size: 1, style: 'solid' },
-          { color: lv, size: 1, style: 'dashed', dashedValue: [4, 4] },
-          { color: lv, size: 1, style: 'dashed', dashedValue: [4, 4] }] } }, false, { height: cssNum('--mod-market-rsi-h', 140) });
-      } catch (e) { logE(L(`RSI не добавлен: ${msgOf(e)}`)); }
-      this.loadMoreHandler = loadMoreHandler;
-      const h = (ts) => loadMoreHandler(ts);
-      if (typeof this.chart.loadMore === 'function') this.chart.loadMore((ts) => { h(ts).then((r) => this.chart.applyMoreData(r.list, r.more)).catch(() => this.chart.applyMoreData([], false)); });
-      else if (typeof this.chart.setLoadDataCallback === 'function') this.chart.setLoadDataCallback(({ type, data, callback }) => { if (type === 'forward' && data) h(data.timestamp).then((r) => callback(r.list, r.more)); else callback([], true); });
+      if (this.chart) { safe('dispose', () => k.dispose(this.container)); this.chart = null; }
+      const chart = k.init(this.container, { styles: this.styles() });
+      if (!chart) throw mkErr('LIB', 'klinecharts.init вернул пустоту');
+      this.chart = chart;
+      this.ids.clear(); this.selectedId = this.hoverId = this.drawingId = null; this.tool = null; this._notify();
+      safe('часовой пояс', () => chart.setTimezone(Intl.DateTimeFormat().resolvedOptions().timeZone));
+      safe('RSI-панель', () => chart.createIndicator(
+        { name: 'MKT_RSI', styles: { lines: [{ color: this.colors.rsi, size: 1, style: 'solid', smooth: false, dashedValue: [2, 2] }] } },
+        false, { height: cssNum('--mod-market-rsi-h', 140) }));
+      const h = (ts) => (chart === this.chart ? this.loadMoreHandler(ts) : Promise.resolve({ list: [], more: false }));
+      if (typeof chart.loadMore === 'function') chart.loadMore((ts) => { h(ts).then((r) => { if (chart === this.chart) safe('applyMoreData', () => chart.applyMoreData(r.list, r.more)); }).catch((e) => report('подгрузка влево', e)); });
+      else if (typeof chart.setLoadDataCallback === 'function') chart.setLoadDataCallback(({ type, data, callback }) => { if (type === 'forward' && data) h(data.timestamp).then((r) => callback(r.list, r.more)); else callback([], true); });
       else logE(L('в этой версии KLineChart нет loadMore: подгрузка истории влево не работает'));
     },
+    rebuild() { this.build(); },
 
-    setPrecision(pp) { try { this.chart.setPriceVolumePrecision(pp, 0); } catch (e) { logW(L(`точность цены не задана: ${msgOf(e)}`)); } },
-    setData(bars, more) { this.chart.applyNewData(bars, more); },
-    updateBar(bar) { this.chart.updateData(bar); },
-    resize() { try { this.chart && this.chart.resize(); } catch { /* ок */ } },
+    setPrecision(pp) { safe('точность цены', () => this.chart.setPriceVolumePrecision(pp, 0)); },
+    setData(bars, more) { safe('данные', () => this.chart.applyNewData(bars, more)); },
+    updateBar(bar) { safe('свеча', () => this.chart.updateData(bar)); },
+    resize() { safe('resize', () => { if (this.chart) this.chart.resize(); }); },
 
-    // --- линии ---
-    _rm(id) { try { this.chart.removeOverlay({ id }); } catch { try { this.chart.removeOverlay(id); } catch { /* ок */ } } },
-    startTrendLine(onEnd) {
+    /* --- линии --- */
+    _notify() { if (this.onToolChange) this.onToolChange(this.tool); },
+    _ovStyles(level) {
+      const c = this.colors, col = level === 2 ? c.active : level === 1 ? c.hover : c.line, size = level === 2 ? c.wActive : level === 1 ? c.wHover : c.w;
+      return { line: { color: col, size, style: 'solid' }, point: { color: col, borderColor: col, activeColor: c.active, activeBorderColor: c.active } };
+    },
+    _paint(id) {                                                       // вид линии: обычная / под курсором / выбрана
+      if (!id || !this.ids.has(id) || !this.chart) return;
+      const level = id === this.selectedId ? 2 : id === this.hoverId ? 1 : 0;
+      safe('стиль линии', () => this.chart.overrideOverlay({ name: this.ids.get(id), id, styles: this._ovStyles(level) }));
+    },
+    select(id) { const prev = this.selectedId; this.selectedId = id; if (prev && prev !== id) this._paint(prev); this._paint(id); },
+    _rm(id) { safe('удаление линии', () => { try { this.chart.removeOverlay({ id }); } catch { this.chart.removeOverlay(id); } }); this.ids.delete(id); if (this.selectedId === id) this.selectedId = null; if (this.hoverId === id) this.hoverId = null; },
+    startTool(name) {                                                  // name: 'segment' (трендовая) | 'horizontalRayLine' (горизонтальный луч)
       if (!this.chart) return;
       this.cancelDrawing();
-      this.onToolEnd = onEnd;
-      const self = this;
-      const id = this.chart.createOverlay({
-        name: 'segment',                                  // отрезок по двум точкам
-        styles: { line: { color: cssVar('--mod-market-line'), size: 1 }, point: { color: cssVar('--mod-market-line'), borderColor: cssVar('--mod-market-line'), activeColor: cssVar('--mod-market-line-active'), activeBorderColor: cssVar('--mod-market-line-active') } },
-        onDrawEnd: () => { self.drawingId = null; if (self.onToolEnd) self.onToolEnd(); return false; },
-        onSelected: (e) => { self.selectedId = e.overlay.id; return false; },
-        onDeselected: (e) => { if (self.selectedId === e.overlay.id) self.selectedId = null; return false; },
-        onRemoved: (e) => { if (self.selectedId === e.overlay.id) self.selectedId = null; return false; },
-      });
-      this.drawingId = Array.isArray(id) ? id[0] : id;
+      const id = 'mkt_' + (++this.seq), self = this;
+      const who = (e) => (e && e.overlay && e.overlay.id) || id;
+      this.ids.set(id, name); this.tool = name; this.drawingId = id; this._notify();
+      const res = safe('создание линии', () => this.chart.createOverlay({
+        name, id, styles: this._ovStyles(0),
+        onDrawEnd: () => { safe('onDrawEnd', () => { self.drawingId = null; self.tool = null; self.select(id); self._notify(); }); return false; },
+        onMouseEnter: (e) => { safe('onMouseEnter', () => { self.hoverId = who(e); self._paint(self.hoverId); }); return false; },
+        onMouseLeave: (e) => { safe('onMouseLeave', () => { const i = who(e); if (self.hoverId === i) self.hoverId = null; self._paint(i); }); return false; },
+        onSelected: (e) => { safe('onSelected', () => self.select(who(e))); return false; },
+        onDeselected: (e) => { safe('onDeselected', () => { const i = who(e); if (self.selectedId === i) self.selectedId = null; self._paint(i); }); return false; },
+        onRemoved: (e) => { safe('onRemoved', () => { const i = who(e); self.ids.delete(i); if (self.selectedId === i) self.selectedId = null; if (self.hoverId === i) self.hoverId = null; }); return false; },
+      }), null);
+      if (res === null || res === undefined) { this.ids.delete(id); this.drawingId = null; this.tool = null; this._notify(); }
     },
-    cancelDrawing() { if (this.drawingId) { this._rm(this.drawingId); this.drawingId = null; if (this.onToolEnd) this.onToolEnd(); } },
-    removeSelected() { if (!this.selectedId) return false; this._rm(this.selectedId); this.selectedId = null; return true; },
-    clearDrawings() { if (!this.chart) return; try { this.chart.removeOverlay(); } catch { /* ок */ } this.selectedId = null; this.drawingId = null; if (this.onToolEnd) this.onToolEnd(); },
+    cancelDrawing() { if (this.drawingId) { const id = this.drawingId; this.drawingId = null; this.tool = null; this._rm(id); this._notify(); } },
+    removeSelected() { if (!this.selectedId) return false; this._rm(this.selectedId); return true; },
+    clearDrawings() {                                                  // убирает оба вида линий
+      if (!this.chart) return;
+      [...this.ids.keys()].forEach((id) => this._rm(id));
+      ['segment', 'horizontalRayLine'].forEach((name) => safe('очистка', () => this.chart.removeOverlay({ name })));
+      this.ids.clear(); this.selectedId = this.hoverId = this.drawingId = null; this.tool = null; this._notify();
+    },
   };
 
   /* ================= СОСТОЯНИЕ И КЭШ ================= */
@@ -477,7 +548,7 @@
     gapRunning = false; gapBuffer = new Map(); loadingOlder = false; entry = null;
     sel = { symbol, tf }; savePrefs(); syncControls();
     view.querySelector('#mm-metrics').textContent = '';
-    Chart.clearDrawings();                                         // линии при смене монеты/таймфрейма не сохраняются
+    safe('пересоздание графика', () => Chart.rebuild());           // чистые шкалы (авто) и без линий при каждой смене монеты/таймфрейма
     logI(L(`выбрано ${symbol} ${tf}`));
     const hit = cache.get(keyOf(symbol, tf));
     if (hit) { entry = hit; cachePut(keyOf(symbol, tf), hit); Chart.setPrecision(hit.pp); Chart.setData(hit.bars, hit.more); hideMsg(); }
@@ -501,6 +572,7 @@
 
   /* ================= ИНТЕРФЕЙС ================= */
   const ICON_LINE = '<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><path d="M5 18L19 6"/><circle cx="5" cy="18" r="2" fill="currentColor"/><circle cx="19" cy="6" r="2" fill="currentColor"/></svg>';
+  const ICON_HRAY = '<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h15M16 8l4 4-4 4"/><circle cx="5" cy="12" r="2" fill="currentColor"/></svg>';
   const ICON_DEL = '<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h16M9 7V4h6v3M6 7l1 13h10l1-13M10 11v6M14 11v6"/></svg>';
   const ICON_CLEAR = '<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h12M8 7V4h4v3M5 7l1 13h8l1-13"/><path d="M17 12l4 4M21 12l-4 4"/></svg>';
 
@@ -518,7 +590,8 @@
       <div class="mod-market-body">
         <div class="mod-market-tools">
           <button type="button" id="mm-tool-line" class="mod-market-tool" title="Трендовая линия (две точки)">${ICON_LINE}</button>
-          <button type="button" id="mm-tool-del" class="mod-market-tool" title="Удалить выбранную линию (Delete)">${ICON_DEL}</button>
+          <button type="button" id="mm-tool-hray" class="mod-market-tool" title="Горизонтальный луч (одна точка, вправо)">${ICON_HRAY}</button>
+          <button type="button" id="mm-tool-del" class="mod-market-tool" title="Удалить выбранную линию (Delete / Backspace)">${ICON_DEL}</button>
           <button type="button" id="mm-tool-clear" class="mod-market-tool" title="Очистить всё">${ICON_CLEAR}</button>
         </div>
         <div class="mod-market-main">
@@ -532,14 +605,11 @@
     const tfs = view.querySelector('#mm-tfs');
     TFS.forEach((t) => { const b = el('button', 'mod-market-tf', t); b.type = 'button'; b.dataset.tf = t; b.onclick = () => { if (chartReady && t !== sel.tf) select(sel.symbol, t); }; tfs.appendChild(b); });
     bindSymbolSearch();
-    view.querySelector('#mm-tool-line').onclick = () => {
-      if (!chartReady) return;
-      const b = view.querySelector('#mm-tool-line');
-      if (Chart.drawingId) { Chart.cancelDrawing(); return; }
-      b.classList.add('active'); Chart.startTrendLine(() => b.classList.remove('active'));
-    };
+    const toolBtn = (id, name) => { view.querySelector(id).onclick = () => { if (!chartReady) return; if (Chart.tool === name) Chart.cancelDrawing(); else Chart.startTool(name); }; };
+    toolBtn('#mm-tool-line', 'segment'); toolBtn('#mm-tool-hray', 'horizontalRayLine');
+    Chart.onToolChange = (t) => { view.querySelector('#mm-tool-line').classList.toggle('active', t === 'segment'); view.querySelector('#mm-tool-hray').classList.toggle('active', t === 'horizontalRayLine'); };
     view.querySelector('#mm-tool-del').onclick = () => { if (chartReady) deleteSelectedLine(); };
-    view.querySelector('#mm-tool-clear').onclick = () => { if (chartReady) { Chart.clearDrawings(); logI(L('линии очищены')); } };
+    view.querySelector('#mm-tool-clear').onclick = () => { if (chartReady) { Chart.clearDrawings(); logI(L('линии очищены (все виды)')); } };
     // колесо над графиком масштабирует график; страницу и браузерный зум оно не трогает
     view.querySelector('#mm-chartwrap').addEventListener('wheel', (e) => e.preventDefault(), { passive: false });
     syncControls();
@@ -657,11 +727,18 @@
     window.addEventListener('online', () => { if (viewMode === 'market') Stream.kick(); });
     window.addEventListener('offline', () => { if (viewMode === 'market' && streamWanted) { Stream.state = 'offline'; renderStatus(); logW(L('браузер сообщает: нет сети')); } });
     document.addEventListener('visibilitychange', () => { if (!document.hidden && viewMode === 'market' && streamWanted) { Stream.kick(); fetchTicker(); } });
+    // ошибки из кода библиотеки: показать стек (app.js пишет только короткую строку)
+    window.addEventListener('error', (ev) => {
+      if (!chartReady && !chartInit) return;
+      const st = ev.error && ev.error.stack ? String(ev.error.stack) : '';
+      if (!(/klinecharts|market\.js/.test(st + ' ' + (ev.filename || '')) || ev.message === 'Script error.')) return;
+      report('окно', Object.assign(new Error(`${ev.message} (${ev.filename || 'без адреса'}:${ev.lineno || 0})`), { stack: st }));
+    });
     window.addEventListener('keydown', (e) => {
       if (viewMode !== 'market' || !chartReady) return;
       try { if (activeDialog) return; } catch { /* нет диалога */ }
       if (isTyping(e.target)) return;
-      if (e.key === 'Delete') { e.preventDefault(); deleteSelectedLine(); }
+      if (e.key === 'Delete' || e.key === 'Backspace') { e.preventDefault(); deleteSelectedLine(); }
       else if (e.key === 'Escape' && Chart.drawingId) { e.preventDefault(); Chart.cancelDrawing(); }
     });
   }
