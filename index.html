@@ -8,6 +8,7 @@
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="styles.css">
+<link rel="stylesheet" href="market.css">
 </head>
 <body>
 
@@ -24,12 +25,19 @@
 
 <!-- ===== ГЛАВНОЕ ОКНО ===== -->
 <main id="app" class="page" hidden>
-  <div class="search"></div>
-  <div class="tabs-row">
-    <div id="tabs" class="tabs"></div>
-    <span id="upload-status" class="upload-status"></span>
+  <nav class="mod-market-switch" aria-label="Окна">
+    <button type="button" id="mm-tab-gallery" class="mod-market-switch-btn active">Формации</button>
+    <button type="button" id="mm-tab-market" class="mod-market-switch-btn">График</button>
+  </nav>
+  <div id="view-gallery">
+    <div class="search"></div>
+    <div class="tabs-row">
+      <div id="tabs" class="tabs"></div>
+      <span id="upload-status" class="upload-status"></span>
+    </div>
+    <section class="panel"><div id="grid" class="grid"></div></section>
   </div>
-  <section class="panel"><div id="grid" class="grid"></div></section>
+  <section id="mm-view" class="mod-market-view" hidden></section>
 </main>
 
 <!-- ===== МОДАЛКА ===== -->
@@ -122,5 +130,6 @@
 <script src="config.js"></script>
 <script src="storage.js"></script>
 <script src="app.js"></script>
+<script src="market.js"></script>
 </body>
 </html>

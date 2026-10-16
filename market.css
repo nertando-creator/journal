@@ -1,0 +1,94 @@
+/* market.css — окно «График» и переключатель окон. Цвета и размеры только через переменные ниже. */
+:root {
+  /* --- Цвета графика --- */
+  --mod-market-bg: #141414;
+  --mod-market-grid: #1F1F1F;
+  --mod-market-axis-line: #2A2A2A;
+  --mod-market-axis-text: #8A8A8A;
+  --mod-market-up: #2DB35A;
+  --mod-market-down: #D14343;
+  --mod-market-neutral: #8A8A8A;
+  --mod-market-crosshair: #6A6A6A;
+  --mod-market-crosshair-bg: #3A3A3A;
+  --mod-market-rsi: #B48CF2;
+  --mod-market-rsi-level: #5C5C5C;
+  --mod-market-line: #5B9BF0;            /* трендовая линия */
+  --mod-market-line-active: #FFFFFF;     /* выбранная линия */
+  --mod-market-live: var(--status-success);
+  --mod-market-wait: var(--warn);
+  --mod-market-off: #D14343;
+  --mod-market-metrics-text: #FFFFFF;
+  --mod-market-tool-bg: #1B1B1B;
+  --mod-market-tool-hover: #2A2A2A;
+
+  /* --- Размеры --- */
+  --mod-market-page-top: 24px;           /* = верхний отступ .page в styles.css */
+  --mod-market-switch-h: 36px;
+  --mod-market-switch-gap: 16px;         /* переключатель → содержимое */
+  --mod-market-bottom-reserve: 48px;     /* место под нижнюю панель «Логи» */
+  --mod-market-top-h: 36px;
+  --mod-market-top-gap: 10px;
+  --mod-market-input-w: 200px;
+  --mod-market-btn-h: 28px;
+  --mod-market-tools-w: 40px;
+  --mod-market-tool-size: 32px;
+  --mod-market-metrics-h: 22px;
+  --mod-market-rsi-h: 140px;             /* высота панели RSI (число, читает market.js) */
+  --mod-market-list-max-h: 280px;
+  --mod-market-dot: 8px;
+  --mod-market-fs: 12px;
+  --mod-market-fs-metrics: 11px;
+  --mod-market-radius: 6px;
+}
+
+/* ===== переключатель окон ===== */
+.mod-market-switch { display: inline-flex; height: var(--mod-market-switch-h); margin-bottom: var(--mod-market-switch-gap); border-radius: 999px; background: var(--bg-search); padding: 3px; gap: 2px; }
+.mod-market-switch-btn { padding: 0 20px; border-radius: 999px; font-size: var(--fs-tab); color: var(--text-muted); }
+.mod-market-switch-btn:hover { color: var(--text); }
+.mod-market-switch-btn.active { background: var(--btn); color: var(--text); }
+
+/* ===== режим «График»: подстройка общей страницы ===== */
+body.mod-market-on .page { padding-bottom: 0; }
+body.mod-market-on #stats { display: none; }          /* счётчики галереи */
+
+/* ===== окно ===== */
+.mod-market-view { display: flex; flex-direction: column; gap: var(--mod-market-top-gap);
+  height: calc(100vh - var(--mod-market-page-top) - var(--mod-market-switch-h) - var(--mod-market-switch-gap) - var(--mod-market-bottom-reserve));
+  height: calc(100dvh - var(--mod-market-page-top) - var(--mod-market-switch-h) - var(--mod-market-switch-gap) - var(--mod-market-bottom-reserve));
+  min-height: 320px; }
+
+.mod-market-top { display: flex; align-items: center; gap: 14px; height: var(--mod-market-top-h); flex: none; }
+.mod-market-sym { position: relative; }
+.mod-market-input { width: var(--mod-market-input-w); height: var(--mod-market-top-h); padding: 0 12px; background: var(--bg-field); border: 1px solid var(--line-field); border-radius: var(--mod-market-radius); font-size: 13px; outline: none; text-transform: uppercase; }
+.mod-market-input:focus { border-color: var(--line-menu); }
+.mod-market-list { position: absolute; left: 0; top: calc(100% + 4px); width: max(100%, 240px); max-height: var(--mod-market-list-max-h); overflow-y: auto; background: var(--bg-menu); border: 1px solid var(--line-menu); border-radius: var(--mod-market-radius); z-index: 20; padding: 4px; }
+.mod-market-item { display: flex; justify-content: space-between; gap: 10px; padding: 6px 8px; border-radius: 4px; font-size: var(--mod-market-fs); cursor: pointer; }
+.mod-market-item.active { background: var(--btn); }
+.mod-market-item small { color: var(--text-muted); font-size: var(--fs-chip); align-self: center; }
+.mod-market-note { padding: 8px; font-size: var(--mod-market-fs); color: var(--text-muted); }
+.mod-market-note button { margin-left: 8px; color: var(--text); text-decoration: underline; }
+
+.mod-market-tfs { display: flex; gap: 4px; }
+.mod-market-tf { height: var(--mod-market-btn-h); padding: 0 10px; border-radius: var(--mod-market-radius); font-size: var(--mod-market-fs); color: var(--text-muted); background: var(--bg-field); }
+.mod-market-tf:hover { color: var(--text); }
+.mod-market-tf.active { background: var(--btn); color: var(--text); }
+
+.mod-market-status { margin-left: auto; display: inline-flex; align-items: center; gap: 6px; font-size: var(--fs-label); color: var(--text-muted); }
+.mod-market-dot { width: var(--mod-market-dot); height: var(--mod-market-dot); border-radius: 50%; background: var(--text-muted); }
+.mod-market-status[data-s="live"] .mod-market-dot { background: var(--mod-market-live); }
+.mod-market-status[data-s="wait"] .mod-market-dot { background: var(--mod-market-wait); }
+.mod-market-status[data-s="off"] .mod-market-dot { background: var(--mod-market-off); }
+
+.mod-market-body { flex: 1; min-height: 0; display: flex; gap: 8px; }
+.mod-market-tools { width: var(--mod-market-tools-w); flex: none; display: flex; flex-direction: column; gap: 6px; padding: 4px; background: var(--mod-market-tool-bg); border-radius: var(--mod-market-radius); align-self: flex-start; }
+.mod-market-tool { width: var(--mod-market-tool-size); height: var(--mod-market-tool-size); display: grid; place-items: center; border-radius: 4px; color: var(--text-muted); }
+.mod-market-tool:hover { background: var(--mod-market-tool-hover); color: var(--text); }
+.mod-market-tool.active { background: var(--btn); color: var(--text); }
+
+.mod-market-main { flex: 1; min-width: 0; display: flex; flex-direction: column; background: var(--mod-market-bg); border-radius: var(--mod-market-radius); overflow: hidden; }
+.mod-market-metrics { flex: none; height: var(--mod-market-metrics-h); padding: 0 10px; display: flex; align-items: center; font-size: var(--mod-market-fs-metrics); color: var(--mod-market-metrics-text); white-space: nowrap; }
+.mod-market-chartwrap { position: relative; flex: 1; min-height: 0; }
+.mod-market-chart { position: absolute; inset: 0; }
+.mod-market-msg { position: absolute; inset: 0; display: grid; place-content: center; justify-items: center; gap: 10px; text-align: center; font-size: var(--mod-market-fs); color: var(--text-muted); background: var(--mod-market-bg); z-index: 5; }
+.mod-market-msg.err { color: var(--error-text); }
+.mod-market-msg button { padding: 6px 14px; border-radius: var(--mod-market-radius); background: var(--btn); color: var(--text); }

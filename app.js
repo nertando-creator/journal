@@ -1,6 +1,7 @@
 /* app.js — интерфейс. С Supabase общается только через DB (storage.js). */
-const APP_VERSION = 'v3.0';
+const APP_VERSION = 'v4.0';
 const CFG = window.APP_CONFIG;
+let viewMode = 'gallery';                // какое окно открыто: 'gallery' (Формации) или 'market' (График); меняет market.js
 const $ = (s, r = document) => r.querySelector(s);
 
 // ---- настройки, которые удобно менять одной строкой ----
@@ -655,7 +656,7 @@ function refreshSaveUI() {
 
 /* ================= МОДАЛКА ================= */
 const isModalOpen = () => !$('#modal').hidden;
-const canAdd = () => !$('#app').hidden && !isModalOpen() && !activeDialog;
+const canAdd = () => !$('#app').hidden && viewMode === 'gallery' && !isModalOpen() && !activeDialog;
 const curImage = () => state.images.find((x) => x.id === state.modalId);
 let modalPath = null;
 
@@ -1272,6 +1273,7 @@ function bindUI() {
   // клавиши
   window.addEventListener('keydown', (e) => {
     if (activeDialog) { if (e.key === 'Escape') { e.preventDefault(); activeDialog.cancel(); } return; }
+    if (viewMode !== 'gallery') return;                                  // открыт «График»: клавиши галереи не действуют
     if (state.menu) { if (e.key === 'Escape') { e.preventDefault(); closeMenu(); } return; }   // Esc: сначала список, потом модалка
     if (isModalOpen()) {
       if (e.key === 'Escape') { e.preventDefault(); closeModal(); }
@@ -1287,7 +1289,7 @@ function bindUI() {
   window.addEventListener('drop', (e) => {
     if (!hasFiles(e)) return;
     e.preventDefault();
-    if (!canAdd()) { logI('Перетаскивание проигнорировано (открыто окно или нет входа)'); return; }
+    if (!canAdd()) { logI('Перетаскивание проигнорировано (открыто окно, «График» или нет входа)'); return; }
     processFiles([...e.dataTransfer.files], 'drop');
   });
   // вставка из буфера
