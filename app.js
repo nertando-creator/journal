@@ -1,5 +1,5 @@
 /* app.js — интерфейс. С Supabase общается только через DB (storage.js). */
-const APP_VERSION = 'v4.1';
+const APP_VERSION = 'v4.2';
 const CFG = window.APP_CONFIG;
 let viewMode = 'gallery';                // какое окно открыто: 'gallery' (Формации) или 'market' (График); меняет market.js
 const $ = (s, r = document) => r.querySelector(s);

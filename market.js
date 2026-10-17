@@ -26,6 +26,7 @@
   const SYMBOLS_TTL_MS = 12 * 3600e3;
   const PREFS_KEY = 'journal_market_v1', SYMBOLS_KEY = 'journal_market_symbols_v1';
   const RSI_PERIOD = 14;
+  const HRAY = 'mktHRay';                // имя своего горизонтального луча
 
   /* ================= МЕЛОЧИ ================= */
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -214,18 +215,22 @@
         throw mkErr('LIB', 'KLineChart не загрузился ни по одному адресу. Проверь интернет');
       })();
     },
-    // Предел сжатия свечи зашит в v9 (MIN: 1 px) и снаружи не меняется. Скачиваем файл сами, заменяем число и запускаем как свой скрипт
-    // (это же делает ошибки библиотеки читаемыми: скрипт не «чужой»). Не получилось — обычный <script crossorigin>.
+    // Предел сжатия свечи зашит в v9.8.10 как `var Ct=1,bt=50,` (мин./макс. ширина свечи) и снаружи не меняется. Скачиваем файл сами,
+    // меняем число и запускаем как свой скрипт (ошибки библиотеки тогда читаемы). Порядок: точная строка → шаблон → без правки.
     async _loadPatched(u) {
       try {
         const r = await fetch(u); if (!r.ok) return false;
-        const src = await r.text(), re = /MIN:\s*1\s*,\s*MAX:\s*50/;
-        if (!re.test(src)) { logW(L('в файле библиотеки не найден предел сжатия: запас отдаления не расширен')); return false; }
+        let src = await r.text(), how = '';
+        const exact = 'var Ct=1,bt=50,';
+        const re = /(var \w+=)1(,\w+=50,\w+=function\(\)\{function \w+\(\w+\)\{this\._dateTimeFormat)/;
+        if (src.includes(exact)) { src = src.replace(exact, () => `var Ct=${BAR_SPACE_MIN},bt=50,`); how = 'по точной строке'; }
+        else if (re.test(src)) { src = src.replace(re, (m, p1, p2) => p1 + BAR_SPACE_MIN + p2); how = 'по шаблону'; }
+        else { logW(L('предел сжатия не найден в файле библиотеки: запас отдаления не расширен')); return false; }
         const s = document.createElement('script');
-        s.textContent = src.replace(re, `MIN:${BAR_SPACE_MIN},MAX:50`) + '\n//# sourceURL=klinecharts-patched.js';
+        s.textContent = src + '\n//# sourceURL=klinecharts-patched.js';
         document.head.appendChild(s);
         if (!libReady()) return false;
-        logI(L(`предел сжатия свечи изменён: ${BAR_SPACE_MIN} px вместо 1`)); return true;
+        logI(L(`предел сжатия изменён ${how}: ${BAR_SPACE_MIN} px вместо 1`)); return true;
       } catch (e) { logW(L(`загрузка с правкой не удалась (${msgOf(e)}), пробую обычным скриптом`)); return false; }
     },
     _loadTag(u) {
@@ -294,11 +299,25 @@
       });
     },
 
+    /* --- свой горизонтальный луч: один клик, от точки вправо до края (встроенный horizontalRayLine в v9.8.10 требует две точки) --- */
+    registerHRay() {
+      window.klinecharts.registerOverlay({
+        name: HRAY, totalStep: 2,                                       // totalStep 2 = одна точка
+        needDefaultPointFigure: true, needDefaultXAxisFigure: true, needDefaultYAxisFigure: true,   // точка и цена на оси
+        createPointFigures: ({ coordinates, bounding }) => {
+          if (!coordinates || !coordinates.length) return [];
+          const p = coordinates[0];
+          return { type: 'line', attrs: { coordinates: [{ x: p.x, y: p.y }, { x: bounding.width, y: p.y }] } };
+        },
+      });
+    },
+
     /* --- создание/пересоздание графика (пересоздание = шкалы снова автоматические) --- */
     create(container, loadMoreHandler) {
       this.container = container; this.loadMoreHandler = loadMoreHandler;
       this.readColors();
       try { this.registerRsi(); } catch (e) { report('регистрация RSI', e); }
+      try { this.registerHRay(); } catch (e) { report('регистрация луча', e); }
       this.build();
     },
     build() {
@@ -309,6 +328,7 @@
       this.chart = chart;
       this.ids.clear(); this.selectedId = this.hoverId = this.drawingId = null; this.tool = null; this._notify();
       safe('часовой пояс', () => chart.setTimezone(Intl.DateTimeFormat().resolvedOptions().timeZone));
+      // minValue/maxValue здесь НЕ передавать: в v9.8.10 override записывает maxValue в minValue; они заданы в registerIndicator
       safe('RSI-панель', () => chart.createIndicator(
         { name: 'MKT_RSI', styles: { lines: [{ color: this.colors.rsi, size: 1, style: 'solid', smooth: false, dashedValue: [2, 2] }] } },
         false, { height: cssNum('--mod-market-rsi-h', 140) }));
@@ -337,7 +357,7 @@
     },
     select(id) { const prev = this.selectedId; this.selectedId = id; if (prev && prev !== id) this._paint(prev); this._paint(id); },
     _rm(id) { safe('удаление линии', () => { try { this.chart.removeOverlay({ id }); } catch { this.chart.removeOverlay(id); } }); this.ids.delete(id); if (this.selectedId === id) this.selectedId = null; if (this.hoverId === id) this.hoverId = null; },
-    startTool(name) {                                                  // name: 'segment' (трендовая) | 'horizontalRayLine' (горизонтальный луч)
+    startTool(name) {                                                  // name: 'segment' (трендовая) | HRAY (свой горизонтальный луч)
       if (!this.chart) return;
       this.cancelDrawing();
       const id = 'mkt_' + (++this.seq), self = this;
@@ -359,7 +379,7 @@
     clearDrawings() {                                                  // убирает оба вида линий
       if (!this.chart) return;
       [...this.ids.keys()].forEach((id) => this._rm(id));
-      ['segment', 'horizontalRayLine'].forEach((name) => safe('очистка', () => this.chart.removeOverlay({ name })));
+      ['segment', HRAY].forEach((name) => safe('очистка', () => this.chart.removeOverlay({ name })));
       this.ids.clear(); this.selectedId = this.hoverId = this.drawingId = null; this.tool = null; this._notify();
     },
   };
@@ -590,7 +610,7 @@
       <div class="mod-market-body">
         <div class="mod-market-tools">
           <button type="button" id="mm-tool-line" class="mod-market-tool" title="Трендовая линия (две точки)">${ICON_LINE}</button>
-          <button type="button" id="mm-tool-hray" class="mod-market-tool" title="Горизонтальный луч (одна точка, вправо)">${ICON_HRAY}</button>
+          <button type="button" id="mm-tool-hray" class="mod-market-tool" title="Горизонтальный луч (один клик, вправо)">${ICON_HRAY}</button>
           <button type="button" id="mm-tool-del" class="mod-market-tool" title="Удалить выбранную линию (Delete / Backspace)">${ICON_DEL}</button>
           <button type="button" id="mm-tool-clear" class="mod-market-tool" title="Очистить всё">${ICON_CLEAR}</button>
         </div>
@@ -606,8 +626,8 @@
     TFS.forEach((t) => { const b = el('button', 'mod-market-tf', t); b.type = 'button'; b.dataset.tf = t; b.onclick = () => { if (chartReady && t !== sel.tf) select(sel.symbol, t); }; tfs.appendChild(b); });
     bindSymbolSearch();
     const toolBtn = (id, name) => { view.querySelector(id).onclick = () => { if (!chartReady) return; if (Chart.tool === name) Chart.cancelDrawing(); else Chart.startTool(name); }; };
-    toolBtn('#mm-tool-line', 'segment'); toolBtn('#mm-tool-hray', 'horizontalRayLine');
-    Chart.onToolChange = (t) => { view.querySelector('#mm-tool-line').classList.toggle('active', t === 'segment'); view.querySelector('#mm-tool-hray').classList.toggle('active', t === 'horizontalRayLine'); };
+    toolBtn('#mm-tool-line', 'segment'); toolBtn('#mm-tool-hray', HRAY);
+    Chart.onToolChange = (t) => { view.querySelector('#mm-tool-line').classList.toggle('active', t === 'segment'); view.querySelector('#mm-tool-hray').classList.toggle('active', t === HRAY); };
     view.querySelector('#mm-tool-del').onclick = () => { if (chartReady) deleteSelectedLine(); };
     view.querySelector('#mm-tool-clear').onclick = () => { if (chartReady) { Chart.clearDrawings(); logI(L('линии очищены (все виды)')); } };
     // колесо над графиком масштабирует график; страницу и браузерный зум оно не трогает
