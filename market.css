@@ -17,7 +17,7 @@
   --mod-market-line-active: #FFFFFF;     /* выбранная линия */
   --mod-market-line-w: 1;                /* толщина линии, px (число) */
   --mod-market-line-w-hover: 2;
-  --mod-market-line-w-active: 3;
+  --mod-market-point-r: 3;               /* радиус кружка на линии при наведении, px (число) */
   --mod-market-live: var(--status-success);
   --mod-market-wait: var(--warn);
   --mod-market-off: #D14343;
@@ -96,3 +96,7 @@ body.mod-market-on #stats { display: none; }          /* счётчики гал
 .mod-market-msg { position: absolute; inset: 0; display: grid; place-content: center; justify-items: center; gap: 10px; text-align: center; font-size: var(--mod-market-fs); color: var(--text-muted); background: var(--mod-market-bg); z-index: 5; }
 .mod-market-msg.err { color: var(--error-text); }
 .mod-market-msg button { padding: 6px 14px; border-radius: var(--mod-market-radius); background: var(--btn); color: var(--text); }
+
+/* курсор над графиком: обычная стрелка (библиотека ставит крестик); «палец» только над кнопками панели */
+.mod-market-chart, .mod-market-chart * { cursor: default !important; }
+.mod-market-tool { cursor: pointer; }

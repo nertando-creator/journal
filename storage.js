@@ -9,6 +9,7 @@
   const RETRY_DELAYS = [500, 1500, 3000];    // до 3 повторов при сбоях сети, пауза растёт
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   let noPreviewCol = false;                  // в images нет колонки preview_size (см. SQL в описании v3.0): пишем без неё
+  let slotsOn = false;                       // есть ли в images колонки слотов/Дата/ТФ (SQL v4.5); без них новые поля скрыты
   let netIsDown = false;
   function netDown() { if (!netIsDown) { netIsDown = true; if (window.DB && window.DB.onNet) window.DB.onNet(false); } }
   function netUp() { if (netIsDown) { netIsDown = false; if (window.DB && window.DB.onNet) window.DB.onNet(true); } }
@@ -56,6 +57,23 @@
     return m ? m[1] : s.replace(/\/+$/, '');
   }
 
+  const SLOT_COLS = 'chart_path,chart_preview_path,chart_size,extra_path,extra_preview_path,extra_size,symbol,timeframe,range_from,range_to,chart_params';
+  // все пути файлов записи: до трёх оригиналов и до трёх превью
+  const allPaths = (r) => [r.original_path, r.preview_path, r.chart_path, r.chart_preview_path, r.extra_path, r.extra_preview_path].filter(Boolean);
+  // повторы при сбоях сети для одной операции (пути уникальны, повтор безопасен)
+  async function attemptNet(label, fn) {
+    for (let i = 0; ; i++) {
+      const res = await Promise.resolve().then(fn).catch((e) => ({ error: e }));
+      if (!res.error) { netUp(); return res; }
+      if (!isTransient(res.error)) { netUp(); return res; }
+      netDown();
+      if (i >= RETRY_DELAYS.length) return res;
+      if (window.DB.onRetry) window.DB.onRetry(label, i + 1, res.error);
+      await sleep(RETRY_DELAYS[i]);
+    }
+  }
+  let usageCols = null;                      // какой набор колонок для подсчёта места работает
+
   async function countImagesOf(folderId) {
     const { count, error } = await sb.from('images').select('id', { count: 'exact', head: true }).eq('folder_id', folderId);
     if (error) fail('Папка: подсчёт картинок', error);
@@ -70,6 +88,16 @@
     supabaseUrl() { return cleanUrl(cfg.SUPABASE_URL); },
     init() { sb = window.supabase.createClient(cleanUrl(cfg.SUPABASE_URL), String(cfg.SUPABASE_KEY).trim()); },
     ready() { return !!sb; },
+    slotsOn() { return slotsOn; },
+    // Есть ли новые колонки (SQL v4.5). Сбой сети пробрасывается (будет повтор), «колонки нет» = слоты выключены.
+    async probeSlots() {
+      const { error } = await sb.from('images').select(SLOT_COLS).limit(1);
+      if (error) {
+        if (isTransient(error)) fail('Проверка новых колонок', error);
+        slotsOn = false; return { on: false, why: describe(error) };
+      }
+      slotsOn = true; return { on: true };
+    },
 
     // ---------- вход ----------
     async getSession() {
@@ -162,6 +190,7 @@
           hash: meta.hash, width: meta.width, height: meta.height, size: meta.size,
           original_path: originalPath, preview_path: previewPath
         };
+        if (slotsOn && meta.symbol !== undefined) { row.symbol = meta.symbol; row.timeframe = meta.timeframe; }
         if (!noPreviewCol) row.preview_size = previewBlob.size;
         const ins = () => sb.from('images').insert(row).select().single();
         let res = await attempt('запись в базу', ins);
@@ -188,9 +217,41 @@
     async deleteImage(img) {
       const { error } = await sb.from('images').delete().eq('id', img.id);
       if (error) fail('Картинка: удаление', error);
-      const paths = [img.original_path, img.preview_path].filter(Boolean);
+      const paths = allPaths(img);
       const res = await sb.storage.from(cfg.BUCKET).remove(paths);
       if (res.error) fail(`Запись удалена, но файлы остались (${paths.join(', ')})`, res.error);
+    },
+    // Слот картинки (chart | extra): загрузка оригинала и превью, потом запись путей в строку. Возвращает patch для строки.
+    async addSlotImage(imageId, slot, file, mime, previewBlob, ext) {
+      const { data: { session } } = await sb.auth.getSession();
+      if (!session) fail('Нет сессии', 'войди заново');
+      const uid = session.user.id, tag = crypto.randomUUID();
+      const fullPath = `${uid}/${slot}/${imageId}_${tag}.${ext}`;
+      const prevPath = `${uid}/${slot}_preview/${imageId}_${tag}.webp`;
+      const uploaded = [];
+      try {
+        for (const [path, blob, type] of [[fullPath, file, mime], [prevPath, previewBlob, previewBlob.type || 'image/webp']]) {
+          const r = await attemptNet('загрузка файла', () => sb.storage.from(cfg.BUCKET).upload(path, blob, { contentType: type, upsert: true, cacheControl: CACHE_CONTROL }));
+          if (r.error) fail(`Хранилище: загрузка ${path}`, r.error);
+          uploaded.push(path);
+        }
+        const patch = { [slot + '_path']: fullPath, [slot + '_preview_path']: prevPath, [slot + '_size']: file.size };
+        const r = await attemptNet('запись в базу', () => sb.from('images').update(patch).eq('id', imageId));
+        if (r.error) fail('База: запись слота', r.error);
+        return patch;
+      } catch (e) {
+        if (uploaded.length && !e.transient) await sb.storage.from(cfg.BUCKET).remove(uploaded);   // при обрыве связи файлы не трогаем: неизвестно, записалась ли строка
+        throw e;
+      }
+    },
+    // Очищает слот: сначала строка (поля в null), потом файлы. Если файлы не удалились, ошибка с путями.
+    async removeSlotImage(img, slot) {
+      const paths = [img[slot + '_path'], img[slot + '_preview_path']].filter(Boolean);
+      const { error } = await sb.from('images').update({ [slot + '_path']: null, [slot + '_preview_path']: null, [slot + '_size']: null }).eq('id', img.id);
+      if (error) fail('Слот: очистка', error);
+      if (!paths.length) return;
+      const res = await sb.storage.from(cfg.BUCKET).remove(paths);
+      if (res.error) fail(`Слот очищен, но файлы остались (${paths.join(', ')})`, res.error);
     },
 
     // Быстрая запись при закрытии вкладки (переживает выгрузку страницы)
@@ -218,7 +279,7 @@
     async deleteFolderWithImages(folderId) {
       const imgs = [];
       for (let from = 0; ; from += 1000) {
-        const { data, error } = await sb.from('images').select('id,original_path,preview_path').eq('folder_id', folderId).order('created_at').range(from, from + 999);
+        const { data, error } = await sb.from('images').select('id,original_path,preview_path' + (slotsOn ? ',chart_path,chart_preview_path,extra_path,extra_preview_path' : '')).eq('folder_id', folderId).order('created_at').range(from, from + 999);
         if (error) fail('Папка: список картинок', error);
         imgs.push(...data);
         if (data.length < 1000) break;
@@ -227,7 +288,7 @@
       const CH = 20;
       for (let i = 0; i < imgs.length; i += CH) {
         const chunk = imgs.slice(i, i + CH);
-        const paths = chunk.flatMap((x) => [x.original_path, x.preview_path]).filter(Boolean);
+        const paths = chunk.flatMap(allPaths);
         try {
           const r = await sb.storage.from(cfg.BUCKET).remove(paths);
           if (r.error) fail(`Хранилище: удаление файлов (пачка ${i / CH + 1}, ${paths.length} шт.)`, r.error);
@@ -293,11 +354,16 @@
       }
       return all.map(normImage);
     },
-    async listUsage() {                      // размеры файлов; preview_size может отсутствовать (тогда оценка в app.js)
+    async listUsage() {                      // размеры файлов; preview_size и слоты могут отсутствовать (тогда оценка в app.js)
+      const chain = ['size,preview_size,chart_size,extra_size', 'size,preview_size', 'size'];
       const all = [];
       for (let from = 0; ; from += 1000) {
-        let { data, error } = await sb.from('images').select('size,preview_size').order('id').range(from, from + 999);
-        if (error && /preview_size/.test(error.message || '')) ({ data, error } = await sb.from('images').select('size').order('id').range(from, from + 999));
+        let data = null, error = null;
+        for (const cols of (usageCols ? [usageCols] : chain)) {
+          ({ data, error } = await sb.from('images').select(cols).order('id').range(from, from + 999));
+          if (!error) { usageCols = cols; break; }
+          if (isTransient(error) || !/preview_size|chart_size|extra_size/.test(error.message || '')) break;
+        }
         if (error) fail('Занятое место', error);
         all.push(...data);
         if (data.length < 1000) break;
@@ -322,7 +388,7 @@
   // Повторы при сбоях сети для безопасных (идемпотентных) операций: до 3 раз с растущей паузой.
   // Создание папки и тега не повторяем: повтор мог бы создать дубль.
   ['getSession', 'listFolders', 'renameFolder', 'saveFolderOrder', 'listImages', 'listAllImages', 'listUsage', 'updateImage', 'deleteImage',
-   'listTags', 'setImageTag', 'countImages', 'countTagUsage', 'deleteTag', 'signUrls'].forEach((name) => {
+   'listTags', 'setImageTag', 'countImages', 'countTagUsage', 'deleteTag', 'signUrls', 'probeSlots', 'removeSlotImage'].forEach((name) => {
     const orig = window.DB[name];
     window.DB[name] = async function (...args) {
       for (let i = 0; ; i++) {

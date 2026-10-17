@@ -1,5 +1,5 @@
 /* app.js — интерфейс. С Supabase общается только через DB (storage.js). */
-const APP_VERSION = 'v4.2';
+const APP_VERSION = 'v4.5';
 const CFG = window.APP_CONFIG;
 let viewMode = 'gallery';                // какое окно открыто: 'gallery' (Формации) или 'market' (График); меняет market.js
 const $ = (s, r = document) => r.querySelector(s);
@@ -198,6 +198,11 @@ async function enterApp() {
   $('#app').hidden = false;
   logI('Вход выполнен');
   state.loadingImages = true; renderTabs(); renderGrid();       // первая загрузка: заглушки вместо карточек
+  try {
+    const pr = await DB.probeSlots();
+    if (pr.on) logI('Слоты картинок, Дата и ТФ включены (колонки в базе есть)');
+    else logW(`В базе нет новых колонок (SQL v4.5 не запущен): слоты картинок, Дата и ТФ скрыты, всё работает как в v4.2. Причина: ${pr.why}`);
+  } catch (e) { logW(`Новые колонки не проверены (${errMsg(e)}): слоты скрыты до следующего входа`); }
   refreshUsage();
   try { state.folders = await DB.listFolders(); }
   catch (e) { logE(errMsg(e)); toast('Не удалось загрузить папки'); }
@@ -288,7 +293,7 @@ async function loadImages({ quiet = false } = {}) {
     const rows = await DB.listImages(folder);
     const t1 = performance.now();
     const had = rows.filter((r) => hasUrl(r.preview_path)).length;
-    await ensureUrls(rows.map((r) => r.preview_path));
+    await ensureUrls(rows.flatMap((r) => [r.preview_path, r.chart_preview_path]));
     const t2 = performance.now();
     if (seq !== state.loadSeq) return;        // успели переключить вкладку
     state.loadFailed = false;
@@ -378,6 +383,14 @@ function mimeOf(f) {
     if (m) { const x = m[1].toLowerCase(); return x === 'png' ? 'image/png' : x === 'webp' ? 'image/webp' : 'image/jpeg'; }
   }
   return null;
+}
+// Монета и таймфрейм из названия: «FILUSDT 1m» → { symbol: 'FILUSDT', tf: '1m' }. Монета: первое слово на USDT (регистр не важен).
+const TF_LIST = ['1m', '5m', '15m', '1h', '4h', '1d'];
+function parseTitle(title) {
+  const words = String(title || '').split(/[\s,;:|/\\()[\]]+/).filter(Boolean);
+  const coin = words.find((w) => /^.+usdt$/i.test(w));
+  const tf = words.map((w) => w.toLowerCase()).find((w) => TF_LIST.includes(w));
+  return { symbol: coin ? coin.toUpperCase() : null, tf: tf || null };
 }
 const titleOf = (f) => (f.name || '').replace(/\.[^.]+$/, '') || 'Без названия';
 function pasteTitle() {
@@ -493,7 +506,9 @@ async function uploadOne(it, folderId) {
   const rerender = () => { if (state.activeFolder === folderId) renderGrid(); };
   try {
     const { width, height, preview } = await makePreview(it.file);
-    const row = await DB.addImage({ id: it.id, title: it.title, folder_id: folderId, created_at: it.createdAt, hash: it.hash, width, height, size: it.file.size, ext: MIME_EXT[it.mime] }, it.file, it.mime, preview);
+    const pt = DB.slotsOn() ? parseTitle(it.title) : null;
+    const row = await DB.addImage({ id: it.id, title: it.title, folder_id: folderId, created_at: it.createdAt, hash: it.hash, width, height, size: it.file.size, ext: MIME_EXT[it.mime],
+      ...(pt ? { symbol: pt.symbol, timeframe: pt.tf } : {}) }, it.file, it.mime, preview);
     await ensureUrls([row.preview_path]);
     addUsage(row, 1);
     removePending(it.id);
@@ -562,7 +577,7 @@ async function dupDialog(dups, restCount) {
 // запись идёт по очереди для своего ключа. Каждая запись знает id картинки, поэтому быстрые переключения
 // не могут записать данные не в ту картинку, а повторы и гонки не откатывают новое значение старым.
 const saver = { desired: new Map(), timers: new Map(), queues: new Map(), failed: new Map(), saved: new Set(), inflight: 0, retry: null };
-const FIELD_LABEL = { title: 'название', comment: 'комментарий', status: 'статус', folder_id: 'папка', is_favorite: 'избранное', tag: 'тег' };
+const FIELD_LABEL = { title: 'название', comment: 'комментарий', status: 'статус', folder_id: 'папка', is_favorite: 'избранное', tag: 'тег', range_to: 'дата', timeframe: 'ТФ', symbol: 'монета' };
 const saveKey = (id, field, tagId) => (field === 'tag' ? `${id}:tag:${tagId}` : `${id}:${field}`);
 
 function queueSave(id, field, value, { delay = 0, tagId = null } = {}) {
@@ -594,6 +609,9 @@ function saveLogText(d, v) {
   if (d.field === 'status') return `Статус «${statusDef(v).label}»: ${n}`;
   if (d.field === 'folder_id') return `Папка «${folderName(v)}»: ${n}`;
   if (d.field === 'is_favorite') return `Избранное ${v ? 'вкл' : 'выкл'}: ${n}`;
+  if (d.field === 'range_to') return `Дата ${v ? new Date(v).toLocaleString('ru-RU') : 'очищена'}: ${n}`;
+  if (d.field === 'timeframe') return `ТФ ${v || 'очищен'}: ${n}`;
+  if (d.field === 'symbol') return `Монета ${v || 'не найдена в названии'}: ${n}`;
   return `Название сохранено: «${String(v).trim()}»`;
 }
 async function executeKey(key) {         // никогда не бросает: ошибки уходят в логи и в пометку интерфейса
@@ -646,6 +664,8 @@ function refreshSaveUI() {
   $('#status-select').classList.toggle('save-error', bad('status'));
   $('#folder-select').classList.toggle('save-error', bad('folder_id'));
   $('#m-comment').classList.toggle('save-error', bad('comment'));
+  $('#m-date').classList.toggle('save-error', bad('range_to'));
+  $('#tf-select').classList.toggle('save-error', bad('timeframe'));
   const k = saveKey(id, 'comment'), st = $('#comment-state');
   let text = '', err = false;
   if (saver.failed.has(k)) { text = 'Ошибка сохранения'; err = true; }
@@ -697,6 +717,60 @@ function sizeModalImage(im) {
   box.style.height = Math.round(h * s) + 'px';
 }
 
+/* ---------- слоты картинок: Основная (chart), Оригинал (original), Запасная (extra) ---------- */
+const SLOTS = [
+  { id: 'chart', label: 'Основная', none: 'Нет основной' },
+  { id: 'original', label: 'Оригинал', none: 'Нет оригинала' },
+  { id: 'extra', label: 'Запасная', none: 'Пусто. Клик, затем Ctrl+V' }
+];
+let viewSlot = 'original';        // какой слот сейчас показан слева
+let armedSlot = null;             // выбранный для вставки пустой слот ('extra') или null
+const slotPaths = (im, slot) => (slot === 'chart' ? { full: im.chart_path, prev: im.chart_preview_path }
+  : slot === 'extra' ? { full: im.extra_path, prev: im.extra_preview_path } : { full: im.original_path, prev: im.preview_path });
+const slotFilled = (im, slot) => !!slotPaths(im, slot).full;
+const defaultSlot = (im) => (DB.slotsOn() && slotFilled(im, 'chart') ? 'chart' : 'original');
+const allImagePaths = (im) => [im.original_path, im.preview_path, im.chart_path, im.chart_preview_path, im.extra_path, im.extra_preview_path].filter(Boolean);
+function sizeBox(w, h, cap) {
+  const s = Math.min(cssNum('--frame-w') / w, cssNum('--frame-h') / h, cap);
+  const box = $('#m-imgbox');
+  box.style.width = Math.round(w * s) + 'px'; box.style.height = Math.round(h * s) + 'px';
+}
+// Показ слота слева: превью сразу (оно уже в кэше), оригинал поверх, когда догрузится
+function showSlot(im, slot, initial) {
+  const id = im.id, { full, prev: pp } = slotPaths(im, slot);
+  if (!full) return;
+  viewSlot = slot;
+  const img = $('#m-img'), prev = $('#m-img-prev');
+  img.onload = null; prev.onload = null;
+  img.classList.remove('ready'); img.removeAttribute('src'); delete img.dataset.retry;
+  prev.removeAttribute('src');
+  modalPath = full;
+  if (slot === 'original') sizeModalImage(im);
+  else {                                                   // размеры других слотов в базе не хранятся: берём из загруженной картинки
+    sizeBox(4, 3, 99);
+    prev.onload = () => { if (state.modalId === id && viewSlot === slot && prev.naturalWidth) sizeBox(prev.naturalWidth, prev.naturalHeight, 99); };
+  }
+  renderSlots(im);
+  const pc = pp && urlCache.get(pp);
+  if (pc) prev.src = pc.url;
+  const t0 = performance.now(), cached = hasUrl(full);
+  const showFull = () => {
+    if (state.modalId !== id || viewSlot !== slot) return;
+    const c = urlCache.get(full);
+    if (!c) return;
+    const p2 = pp && urlCache.get(pp);
+    if (p2 && !prev.getAttribute('src')) prev.src = p2.url;
+    const t1 = performance.now();
+    img.onload = () => {
+      if (state.modalId !== id || viewSlot !== slot) return;
+      if (slot !== 'original' && img.naturalWidth) sizeBox(img.naturalWidth, img.naturalHeight, 1.5);
+      img.classList.add('ready'); markLoaded(c.url);
+      logI(`⏱ Открыто «${im.title || 'Без названия'}» (${SLOTS.find((x) => x.id === slot).label}): ссылка ${ms(t1 - t0)} мс${cached ? ' (из кэша)' : ''}, оригинал ${ms(performance.now() - t1)} мс`);
+    };
+    img.src = c.url;
+  };
+  if (cached) showFull(); else ensureUrls(allImagePaths(im)).then(showFull);
+}
 function openModal(id) {
   const im = state.images.find((x) => x.id === id);
   if (!im) return;
@@ -706,33 +780,11 @@ function openModal(id) {
   purgeMoved(id);
   $('#modal').hidden = false;
   fitModal();
-  const img = $('#m-img'), prev = $('#m-img-prev');
-  img.classList.remove('ready'); img.removeAttribute('src'); delete img.dataset.retry;
-  prev.removeAttribute('src');
-  sizeModalImage(im);
-  modalPath = im.original_path;
+  armedSlot = null;
   saver.saved.delete(saveKey(id, 'comment'));
   fillPanel(im);
   updateNav();
-  // превью уже в кэше: показываем сразу, оригинал подставляем поверх, когда догрузится
-  const pc = urlCache.get(im.preview_path);
-  if (pc) prev.src = pc.url;
-  const t0 = performance.now(), cached = hasUrl(im.original_path);
-  const showOriginal = () => {
-    if (state.modalId !== id) return;
-    const c = urlCache.get(im.original_path);
-    if (!c) return;
-    const p2 = urlCache.get(im.preview_path);
-    if (p2 && !prev.getAttribute('src')) prev.src = p2.url;
-    const t1 = performance.now();
-    img.onload = () => {
-      if (state.modalId !== id) return;
-      img.classList.add('ready'); markLoaded(c.url);
-      logI(`⏱ Открыто «${im.title || 'Без названия'}»: ссылка ${ms(t1 - t0)} мс${cached ? ' (из кэша)' : ''}, оригинал ${ms(performance.now() - t1)} мс`);
-    };
-    img.src = c.url;
-  };
-  if (cached) showOriginal(); else ensureUrls([im.original_path, im.preview_path]).then(showOriginal);
+  showSlot(im, defaultSlot(im), true);
   // соседние картинки (предыдущая и следующая): оригиналы подписываем и догружаем заранее
   const i = state.images.findIndex((x) => x.id === id);
   const near = [state.images[i - 1], state.images[i + 1]].filter(Boolean).map((x) => x.original_path);
@@ -742,7 +794,7 @@ function closeModal() {
   if (!isModalOpen()) return;
   flushAll(); closeMenu();
   $('#modal').hidden = true;
-  state.modalId = null; modalPath = null;
+  state.modalId = null; modalPath = null; armedSlot = null;
   purgeMoved(null);                // перенесённые картинки исчезают из сетки этой вкладки
 }
 function updateNav() {
@@ -761,9 +813,154 @@ function fillPanel(im) {
   $('#m-title').value = im.title || '';
   $('#m-star').classList.toggle('on', !!im.is_favorite);
   renderTags(im); renderStatus(im); renderFolder(im);
+  renderMeta(im);
   $('#m-comment').value = im.comment || '';
   refreshSaveUI();
 }
+/* ---------- Дата, ТФ, монета ---------- */
+const pad2 = (n) => String(n).padStart(2, '0');
+function isoToLocalInput(iso) {              // UTC из базы → местное время браузера для datetime-local
+  if (!iso) return '';
+  const d = new Date(iso); if (isNaN(d)) return '';
+  return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}T${pad2(d.getHours())}:${pad2(d.getMinutes())}`;
+}
+function localInputToIso(v) {                // местное время из поля → UTC для базы
+  if (!v) return null;
+  const d = new Date(v); return isNaN(d) ? null : d.toISOString();
+}
+function renderMeta(im) {
+  const on = DB.slotsOn();
+  $('#m-meta').hidden = !on; $('#m-slots').hidden = !on;
+  if (!on) return;
+  $('#m-date').value = isoToLocalInput(im.range_to);
+  const v = $('#tf-select .sel-val'); v.textContent = '';
+  if (im.timeframe) v.appendChild(chipEl(im.timeframe)); else v.appendChild(el('span', 'dash', '—'));
+  renderCoin(im);
+}
+function renderCoin(im) {
+  const sym = parseTitle(im.title).symbol;
+  $('#m-coin').textContent = sym ? `Монета: ${sym}` : 'Монета: не найдена в названии';
+}
+function renderTfMenu(m) {
+  const im = curImage(); if (!im) return;
+  TF_LIST.forEach((t) => {                   // повторный клик по выбранному снимает выбор
+    const on = im.timeframe === t;
+    const r = menuItem(chipEl(t), on);
+    r.onclick = () => { setTimeframe(on ? null : t); closeMenu(); };
+    m.appendChild(r);
+  });
+}
+function setTimeframe(v) {
+  const id = state.modalId, im = curImage();
+  if (!im || (im.timeframe || null) === v) return;
+  im.timeframe = v; renderMeta(im);
+  queueSave(id, 'timeframe', v);
+}
+function setDate(iso) {
+  const id = state.modalId, im = curImage();
+  if (!im || (im.range_to || null) === iso) return;
+  im.range_to = iso;
+  queueSave(id, 'range_to', iso);
+}
+// Название изменилось: пересчитать монету (symbol в базе) и, если ТФ пуст, подставить его из названия (выбранный вручную не трогаем)
+function syncFromTitle(id, im) {
+  if (!DB.slotsOn()) return;
+  const p = parseTitle(im.title);
+  if ((im.symbol || null) !== p.symbol) { im.symbol = p.symbol; queueSave(id, 'symbol', p.symbol, { delay: 600 }); }
+  if (!im.timeframe && p.tf) { im.timeframe = p.tf; queueSave(id, 'timeframe', p.tf, { delay: 600 }); if (state.modalId === id) renderMeta(im); }
+  else if (state.modalId === id) renderCoin(im);
+}
+
+/* ---------- миниатюры слотов ---------- */
+function renderSlots(im) {
+  const box = $('#m-slots'); box.textContent = '';
+  if (!DB.slotsOn()) return;
+  SLOTS.forEach((sl) => {
+    const filled = slotFilled(im, sl.id), busy = !!(im._busy && im._busy[sl.id]);
+    const cell = el('div', 'slot-cell');
+    const t = el('div', 'slot' + (filled ? '' : ' empty') + (viewSlot === sl.id && filled ? ' view' : '') + (armedSlot === sl.id ? ' armed' : '') + (busy ? ' busy' : ''));
+    t.dataset.slot = sl.id;
+    if (filled) {
+      const img = el('img'); img.alt = ''; img.draggable = false;
+      const p = slotPaths(im, sl.id).prev; if (p) bindImg(img, p);
+      t.appendChild(img);
+    } else t.appendChild(el('span', 'slot-hint', busy ? 'Загрузка…' : sl.none));
+    if (sl.id === 'extra' && filled) {
+      const x = el('button', 'slot-del'); x.type = 'button'; x.title = 'Удалить запасную'; x.innerHTML = TRI_X;
+      x.addEventListener('click', (e) => { e.stopPropagation(); removeExtra(im.id); });
+      t.appendChild(x);
+    }
+    t.addEventListener('click', () => onSlotClick(im.id, sl.id));
+    if (sl.id === 'extra') {
+      t.addEventListener('dragover', (e) => { if (armedSlot === 'extra' && !filled && e.dataTransfer && [...e.dataTransfer.types].includes('Files')) { e.preventDefault(); e.stopPropagation(); t.classList.add('dropping'); } });
+      t.addEventListener('dragleave', () => t.classList.remove('dropping'));
+      t.addEventListener('drop', (e) => {
+        t.classList.remove('dropping');
+        if (armedSlot !== 'extra' || filled) return;               // слот не выбран: перетаскивание игнорируется
+        e.preventDefault(); e.stopPropagation();
+        const files = [...e.dataTransfer.files].filter((f) => mimeOf(f) || f.type.startsWith('image/'));
+        if (files.length) addExtraFile(im.id, files[0]);
+      });
+    }
+    cell.appendChild(t);
+    cell.appendChild(el('div', 'slot-label' + (viewSlot === sl.id && filled ? ' view' : ''), sl.label));
+    box.appendChild(cell);
+  });
+}
+function onSlotClick(id, slot) {
+  const im = curImage(); if (!im || im.id !== id) return;
+  if (slotFilled(im, slot)) { armedSlot = null; if (viewSlot !== slot) showSlot(im, slot); else renderSlots(im); return; }
+  armedSlot = slot === 'extra' ? (armedSlot === 'extra' ? null : 'extra') : null;   // пустую «Запасную» можно выбрать для вставки
+  renderSlots(im);
+}
+function switchSlot(slot) { const im = curImage(); if (im && DB.slotsOn() && slotFilled(im, slot)) { armedSlot = null; showSlot(im, slot); } }
+async function addExtraFile(id, file) {
+  const im = state.images.find((x) => x.id === id);
+  if (!im || slotFilled(im, 'extra') || (im._busy && im._busy.extra)) return;
+  const mime = mimeOf(file), max = CFG.MAX_FILE_MB * 1024 * 1024, name = file.name || 'из буфера';
+  if (!mime) { skipFile(`${name}: формат не поддерживается (нужны PNG, JPG, WebP)`); return; }
+  if (file.size > max) { skipFile(`${name}: больше ${CFG.MAX_FILE_MB} МБ (${(file.size / 1048576).toFixed(1)} МБ)`); return; }
+  im._busy = Object.assign(im._busy || {}, { extra: true });
+  armedSlot = null;
+  if (state.modalId === id) renderSlots(im);
+  try {
+    const { preview } = await makePreview(file);
+    const patch = await DB.addSlotImage(id, 'extra', file, mime, preview, MIME_EXT[mime]);
+    Object.assign(im, patch);
+    await ensureUrls([patch.extra_path, patch.extra_preview_path]);
+    addUsage({ extra_size: patch.extra_size }, 1);
+    logI(`Запасная картинка добавлена: «${im.title || 'Без названия'}» (${Math.round(file.size / 1024)} КБ)`);
+  } catch (e) {
+    logE(`Запасная картинка не добавлена («${im.title || 'Без названия'}»): ${errMsg(e)}`);
+    toast('Не удалось добавить запасную картинку');
+  } finally {
+    im._busy.extra = false;
+    if (state.modalId === id) renderSlots(im);
+  }
+}
+async function removeExtra(id) {
+  const im = state.images.find((x) => x.id === id);
+  if (!im || !slotFilled(im, 'extra')) return;
+  const choice = await openDialog({
+    title: 'Удалить запасную картинку?', body: el('p', '', `Запасная картинка записи «${im.title || 'Без названия'}» будет удалена навсегда. Оригинал и основная останутся.`),
+    buttons: [{ id: 'cancel', label: 'Отмена', focus: true }, { id: 'delete', label: 'Удалить', kind: 'danger' }]
+  });
+  if (choice !== 'delete') return;
+  const bytes = im.extra_size, snapshot = { extra_path: im.extra_path, extra_preview_path: im.extra_preview_path };
+  try { await DB.removeSlotImage(im, 'extra'); }
+  catch (e) {
+    logE(errMsg(e));
+    if (/файлы остались/.test(errMsg(e))) { im.extra_path = im.extra_preview_path = im.extra_size = null; addUsage({ extra_size: bytes }, -1); }
+    toast('Ошибка при удалении запасной, подробности в логах');
+    if (state.modalId === id) renderSlots(im);
+    return;
+  }
+  im.extra_path = im.extra_preview_path = im.extra_size = null;
+  addUsage({ extra_size: bytes }, -1);
+  logI(`Запасная картинка удалена: «${im.title || 'Без названия'}»`);
+  if (viewSlot === 'extra' && state.modalId === id) showSlot(im, defaultSlot(im)); else if (state.modalId === id) renderSlots(im);
+}
+
 function chipEl(text, { color = null, sm = false, removeTag = null } = {}) {
   const c = el('span', 'chip' + (sm ? ' sm' : '') + (color ? ' tint' : ''));
   if (color) c.style.setProperty('--c', color);
@@ -868,6 +1065,7 @@ function onTitleInput() {
   im.title = $('#m-title').value;
   updateCaption(id);
   queueSave(id, 'title', im.title, { delay: 600 });
+  syncFromTitle(id, im);
 }
 function toggleStar() {
   const id = state.modalId, im = curImage(); if (!im) return;
@@ -934,6 +1132,9 @@ function bindPanel() {
   });
   $('#status-host').addEventListener('click', (e) => { if (!inMenu(e)) toggleMenu('status', $('#status-host'), renderStatusMenu, 'match'); });
   $('#folder-host').addEventListener('click', (e) => { if (!inMenu(e)) toggleMenu('folder', $('#folder-host'), renderFolderMenu, 'match right'); });
+  $('#tf-host').addEventListener('click', (e) => { if (!inMenu(e)) toggleMenu('tf', $('#tf-host'), renderTfMenu, 'match'); });
+  $('#m-date').addEventListener('change', () => setDate(localInputToIso($('#m-date').value)));
+  $('#m-date-clear').addEventListener('click', () => { $('#m-date').value = ''; setDate(null); });
   const c = $('#m-comment');
   c.addEventListener('input', () => {
     const id = state.modalId, im = curImage(); if (!im) return;
@@ -1162,11 +1363,11 @@ async function prefetchAll() {
     keys.forEach((k) => { if (k !== state.activeFolder && !tabCache.has(k)) tabCache.set(k, groups.get(k) || []); });
     const others = keys.filter((k) => k !== state.activeFolder).flatMap((k) => groups.get(k) || []);
     const t1 = performance.now();
-    await ensureUrls(others.map((r) => r.preview_path));
+    await ensureUrls(others.flatMap((r) => [r.preview_path, r.chart_preview_path, r.extra_preview_path]));
     const t2 = performance.now();
-    await preloadMany(others.map((r) => r.preview_path));
+    await preloadMany(others.flatMap((r) => [r.preview_path, r.chart_preview_path].filter(Boolean)));
     const t3 = performance.now();
-    await ensureUrls(rows.map((r) => r.original_path));       // оригиналы только подписываем, не качаем
+    await ensureUrls(rows.flatMap((r) => [r.original_path, r.chart_path, r.extra_path]));       // оригиналы только подписываем, не качаем
     logI(`⏱ Фон: списки ${ms(t1 - t0)} мс, ссылки на превью ${ms(t2 - t1)} мс, превью скачано ${others.length} шт. за ${ms(t3 - t2)} мс, ссылки на оригиналы ${ms(performance.now() - t3)} мс`);
   } catch (e) { logE(`Фоновая подгрузка: ${errMsg(e)}`); }
   finally { prefetching = false; }
@@ -1189,7 +1390,9 @@ function setNet(up) {
 
 // Занятое место: оригиналы + превью (реальный размер, если записан в preview_size, иначе оценка)
 const previewBytes = (r) => (r.preview_size != null ? Number(r.preview_size) : Math.round(Number(r.size || 0) * PREVIEW_RATIO));
-const rowBytes = (r) => Number(r.size || 0) + previewBytes(r);
+// слоты «Основная» и «Запасная»: размер файла + оценка превью (отдельного размера превью у них нет)
+const slotBytes = (n) => (n ? Math.round(Number(n) * (1 + PREVIEW_RATIO)) : 0);
+const rowBytes = (r) => Number(r.size || 0) + previewBytes(r) + slotBytes(r.chart_size) + slotBytes(r.extra_size);
 function fmtBytes(b) {
   const KB = 1024, MB = KB * 1024, GB = MB * 1024;
   if (b >= GB) return `${+(b / GB).toFixed(2)} ГБ`;
@@ -1207,14 +1410,14 @@ function renderUsage() {
 function addUsage(r, sign) {
   if (state.usedBytes === null) return;
   state.usedBytes = Math.max(0, state.usedBytes + sign * rowBytes(r));
-  if (sign > 0 && r.preview_size == null) state.usedApprox = true;
+  if (sign > 0 && (r.preview_size == null || r.chart_size || r.extra_size)) state.usedApprox = true;
   renderUsage();
 }
 async function refreshUsage() {
   try {
     const rows = await DB.listUsage();
     state.usedBytes = rows.reduce((sum, r) => sum + rowBytes(r), 0);
-    state.usedApprox = rows.some((r) => r.preview_size == null);
+    state.usedApprox = rows.some((r) => r.preview_size == null || r.chart_size || r.extra_size);
     renderUsage();
   } catch (e) { logE(`Занятое место не посчитано: ${errMsg(e)}`); }
 }
@@ -1278,6 +1481,7 @@ function bindUI() {
     if (isModalOpen()) {
       if (e.key === 'Escape') { e.preventDefault(); closeModal(); }
       else if ((e.key === 'ArrowLeft' || e.key === 'ArrowRight') && !isTyping(e.target)) { e.preventDefault(); step(e.key === 'ArrowLeft' ? -1 : 1); }
+      else if (['1', '2', '3'].includes(e.key) && !isTyping(e.target) && !e.ctrlKey && !e.metaKey && !e.altKey) { e.preventDefault(); switchSlot(['chart', 'original', 'extra'][Number(e.key) - 1]); }
       return;
     }
     if (e.key === 'F2' && !$('#app').hidden && state.activeFolder !== null && !isTyping(e.target)) { e.preventDefault(); startRename(state.activeFolder); }
@@ -1295,7 +1499,11 @@ function bindUI() {
   // вставка из буфера
   window.addEventListener('paste', (e) => {
     const files = [...((e.clipboardData && e.clipboardData.files) || [])].filter((f) => f.type.startsWith('image/'));
-    if (!files.length || isTyping(e.target) || !canAdd()) return;
+    if (!files.length || isTyping(e.target)) return;
+    if (!$('#app').hidden && viewMode === 'gallery' && isModalOpen() && !activeDialog && armedSlot === 'extra' && DB.slotsOn()) {   // выбран пустой слот «Запасная»
+      e.preventDefault(); addExtraFile(state.modalId, files[0]); return;
+    }
+    if (!canAdd()) return;
     e.preventDefault();
     processFiles(files, 'paste');
   });

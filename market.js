@@ -265,7 +265,7 @@
       this.colors = {
         level: cssVar('--mod-market-rsi-level'), rsi: cssVar('--mod-market-rsi'),
         line: cssVar('--mod-market-line'), hover: cssVar('--mod-market-line-hover'), active: cssVar('--mod-market-line-active'),
-        w: cssNum('--mod-market-line-w', 1), wHover: cssNum('--mod-market-line-w-hover', 2), wActive: cssNum('--mod-market-line-w-active', 3),
+        w: cssNum('--mod-market-line-w', 1), wHover: cssNum('--mod-market-line-w-hover', 2), pointR: cssNum('--mod-market-point-r', 3),
       };
     },
 
@@ -346,13 +346,17 @@
 
     /* --- линии --- */
     _notify() { if (this.onToolChange) this.onToolChange(this.tool); },
+    // Вид линии: 0 обычная, 1 под курсором, 2 выбрана (белая, та же толщина), 3 рисуется (без кружков и обводки).
+    // Стили точки в v9.8.10: radius, borderSize, activeRadius, activeBorderSize и цвета (overlay.point).
     _ovStyles(level) {
-      const c = this.colors, col = level === 2 ? c.active : level === 1 ? c.hover : c.line, size = level === 2 ? c.wActive : level === 1 ? c.wHover : c.w;
-      return { line: { color: col, size, style: 'solid' }, point: { color: col, borderColor: col, activeColor: c.active, activeBorderColor: c.active } };
+      const c = this.colors, col = level === 2 ? c.active : level === 1 ? c.hover : c.line, size = level === 1 ? c.wHover : c.w;
+      const r = level === 3 ? 0 : c.pointR;
+      return { line: { color: col, size, style: 'solid' },
+               point: { color: col, borderColor: col, borderSize: 0, radius: r, activeColor: col, activeBorderColor: col, activeBorderSize: 0, activeRadius: r } };
     },
-    _paint(id) {                                                       // вид линии: обычная / под курсором / выбрана
+    _paint(id) {
       if (!id || !this.ids.has(id) || !this.chart) return;
-      const level = id === this.selectedId ? 2 : id === this.hoverId ? 1 : 0;
+      const level = id === this.drawingId ? 3 : id === this.selectedId ? 2 : id === this.hoverId ? 1 : 0;
       safe('стиль линии', () => this.chart.overrideOverlay({ name: this.ids.get(id), id, styles: this._ovStyles(level) }));
     },
     select(id) { const prev = this.selectedId; this.selectedId = id; if (prev && prev !== id) this._paint(prev); this._paint(id); },
@@ -364,7 +368,7 @@
       const who = (e) => (e && e.overlay && e.overlay.id) || id;
       this.ids.set(id, name); this.tool = name; this.drawingId = id; this._notify();
       const res = safe('создание линии', () => this.chart.createOverlay({
-        name, id, styles: this._ovStyles(0),
+        name, id, styles: this._ovStyles(3),
         onDrawEnd: () => { safe('onDrawEnd', () => { self.drawingId = null; self.tool = null; self.select(id); self._notify(); }); return false; },
         onMouseEnter: (e) => { safe('onMouseEnter', () => { self.hoverId = who(e); self._paint(self.hoverId); }); return false; },
         onMouseLeave: (e) => { safe('onMouseLeave', () => { const i = who(e); if (self.hoverId === i) self.hoverId = null; self._paint(i); }); return false; },
@@ -593,7 +597,6 @@
   /* ================= ИНТЕРФЕЙС ================= */
   const ICON_LINE = '<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><path d="M5 18L19 6"/><circle cx="5" cy="18" r="2" fill="currentColor"/><circle cx="19" cy="6" r="2" fill="currentColor"/></svg>';
   const ICON_HRAY = '<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h15M16 8l4 4-4 4"/><circle cx="5" cy="12" r="2" fill="currentColor"/></svg>';
-  const ICON_DEL = '<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h16M9 7V4h6v3M6 7l1 13h10l1-13M10 11v6M14 11v6"/></svg>';
   const ICON_CLEAR = '<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h12M8 7V4h4v3M5 7l1 13h8l1-13"/><path d="M17 12l4 4M21 12l-4 4"/></svg>';
 
   function buildView() {
@@ -611,7 +614,6 @@
         <div class="mod-market-tools">
           <button type="button" id="mm-tool-line" class="mod-market-tool" title="Трендовая линия (две точки)">${ICON_LINE}</button>
           <button type="button" id="mm-tool-hray" class="mod-market-tool" title="Горизонтальный луч (один клик, вправо)">${ICON_HRAY}</button>
-          <button type="button" id="mm-tool-del" class="mod-market-tool" title="Удалить выбранную линию (Delete / Backspace)">${ICON_DEL}</button>
           <button type="button" id="mm-tool-clear" class="mod-market-tool" title="Очистить всё">${ICON_CLEAR}</button>
         </div>
         <div class="mod-market-main">
@@ -628,7 +630,6 @@
     const toolBtn = (id, name) => { view.querySelector(id).onclick = () => { if (!chartReady) return; if (Chart.tool === name) Chart.cancelDrawing(); else Chart.startTool(name); }; };
     toolBtn('#mm-tool-line', 'segment'); toolBtn('#mm-tool-hray', HRAY);
     Chart.onToolChange = (t) => { view.querySelector('#mm-tool-line').classList.toggle('active', t === 'segment'); view.querySelector('#mm-tool-hray').classList.toggle('active', t === HRAY); };
-    view.querySelector('#mm-tool-del').onclick = () => { if (chartReady) deleteSelectedLine(); };
     view.querySelector('#mm-tool-clear').onclick = () => { if (chartReady) { Chart.clearDrawings(); logI(L('линии очищены (все виды)')); } };
     // колесо над графиком масштабирует график; страницу и браузерный зум оно не трогает
     view.querySelector('#mm-chartwrap').addEventListener('wheel', (e) => e.preventDefault(), { passive: false });
