@@ -10,8 +10,8 @@
   --plus: rgba(255, 255, 255, .3);
   --card-hover: rgba(152, 152, 152, .3);
   --backdrop: rgba(0, 0, 0, .6);
-  --slot-line: #3A3A3A;          /* пунктир пустого слота */
-  --slot-armed: #E8E8E8;         /* выбранный для вставки слот */
+  --slot-line: #3A3A3A;          /* пунктир пустого слота и пустой карточки */
+  --slot-armed: #E8E8E8;         /* выбранный слот / зона вставки */
   --star-off: #5C5C5C;
   --star-on: #E5B700;
   --text: #E8E8E8;
@@ -78,9 +78,13 @@
   --right-gap: 14px;
   --label-gap: 6px;
   --label-h: 13px;
-  --slot-w: 112px;               /* миниатюры слотов в правой панели */
-  --slot-h: 72px;
-  --slot-gap: 9px;
+  --m-side-w: 190px;             /* колонка миниатюр слева в модалке */
+  --m-side-gap: 14px;
+  --m-main-w: 740px;             /* = --frame-w − --m-side-w − --m-side-gap (число, его читает JS) */
+  --zoom-share: 0.8;             /* доля окна под развёрнутый вид */
+  --card-star: 14px;             /* звезда избранного на карточке */
+  --card-star-pad: 8px;
+  --fs-empty: 12px;
   --meta-gap: 4px;               /* отступ строки «Монета» */
   --fs-date: 12px;
   --fs-slot: 10px;
@@ -302,27 +306,48 @@ body.dragging-tab, body.dragging-tab * { cursor: grabbing; user-select: none; }
 .logs-body.only-err .log-INFO, .logs-body.only-err .log-WARN { display: none; }
 .btn.small.active { background: var(--btn-hover); }
 
-/* ===== v4.5: Дата, ТФ, монета, слоты картинок ===== */
+/* ===== v4.5/v4.6: Дата, ТФ, монета, слоты картинок, развёрнутый вид ===== */
 .m-meta { flex: none; }
 .m-meta-row { display: grid; grid-template-columns: minmax(0, 1fr) var(--status-w); column-gap: var(--select-gap); }
 .m-date-wrap { position: relative; }
-.m-date { width: 100%; height: var(--select-h); padding: 0 52px 0 10px; background: var(--bg-select); border: 0; border-radius: var(--r-field); color: var(--text); font: inherit; font-size: var(--fs-date); color-scheme: dark; outline: none; }
-.m-date.save-error { box-shadow: 0 0 0 1px var(--error-line); }
-.m-date::-webkit-calendar-picker-indicator { opacity: .6; cursor: pointer; }
-.m-date-clear { position: absolute; right: 32px; top: 50%; transform: translateY(-50%); width: 16px; height: 16px; display: grid; place-items: center; color: var(--tri); }
+.m-date { width: 100%; height: var(--select-h); padding: 0 30px 0 10px; background: var(--bg-select); border: 0; border-radius: var(--r-field); color: var(--text); font: inherit; font-size: var(--fs-date); outline: none; }
+.m-date::placeholder { color: var(--text-muted); }
+.m-date.save-error, .m-date.invalid { box-shadow: 0 0 0 1px var(--error-line); }
+.m-date-clear { position: absolute; right: 8px; top: 50%; transform: translateY(-50%); width: 16px; height: 16px; display: grid; place-items: center; color: var(--tri); }
 .m-date-clear:hover { color: var(--tri-hover); }
 .m-coin { margin-top: var(--meta-gap); font-size: var(--fs-label); line-height: var(--label-h); color: var(--text-muted); }
 #tf-select.save-error { box-shadow: 0 0 0 1px var(--error-line); }
-.m-slots { flex: none; display: flex; gap: var(--slot-gap); }
-.slot-cell { width: var(--slot-w); }
-.slot { position: relative; width: var(--slot-w); height: var(--slot-h); border-radius: var(--r-field); background: var(--bg-field); overflow: hidden; cursor: pointer; border: 1px solid transparent; }
+
+/* левая часть модалки: большая картинка + колонка миниатюр справа, прижатых к верху */
+.m-frame { justify-content: flex-start; align-items: stretch; gap: var(--m-side-gap); }
+.m-main { position: relative; width: var(--m-main-w); height: 100%; display: flex; align-items: center; justify-content: center; }
+.slots-off .m-main { width: 100%; }
+.slots-off .m-side { display: none; }
+.m-imgbox { cursor: zoom-in; }
+.slots-off .m-imgbox { cursor: default; }
+.m-empty { width: 100%; height: 100%; display: grid; place-items: center; text-align: center; padding: 0 24px; border: 1px dashed var(--slot-line); border-radius: var(--r-field); font-size: var(--fs-empty); color: var(--text-muted); }
+.m-empty.dropping { border-color: var(--slot-armed); }
+.m-side { width: var(--m-side-w); flex: none; align-self: flex-start; display: flex; flex-direction: column; gap: var(--m-side-gap); }
+.slot-cell { width: var(--m-side-w); }
+.slot { position: relative; width: var(--m-side-w); aspect-ratio: var(--card-ratio); border-radius: var(--r-field); background: var(--bg-field); overflow: hidden; cursor: pointer; border: 1px solid transparent; }
 .slot img { width: 100%; height: 100%; object-fit: contain; display: block; }
 .slot.empty { background: transparent; border: 1px dashed var(--slot-line); display: grid; place-items: center; }
-.slot.view { border-color: var(--line-menu); }
-.slot.armed, .slot.dropping { border-color: var(--slot-armed); border-style: dashed; }
+.slot:hover { border-color: var(--line-menu); }
 .slot.busy { opacity: .6; cursor: progress; }
 .slot-hint { padding: 0 6px; text-align: center; font-size: var(--fs-slot); line-height: 1.3; color: var(--text-muted); }
 .slot-del { position: absolute; top: 3px; right: 3px; width: 18px; height: 18px; display: none; place-items: center; border-radius: 50%; background: var(--backdrop); color: var(--text); }
 .slot:hover .slot-del { display: grid; }
 .slot-label { margin-top: var(--label-gap); font-size: var(--fs-label); line-height: var(--label-h); color: var(--text-muted); }
-.slot-label.view { color: var(--text); }
+.extra-del { right: auto; left: 8px; }
+.m-imgbox:hover .extra-del { opacity: 1; }
+
+/* карточки: звезда избранного и пустая рамка «Нет графика» */
+.card-star { position: absolute; top: var(--card-star-pad); left: var(--card-star-pad); z-index: 2; width: var(--card-star); height: var(--card-star); color: var(--star-on); pointer-events: none; }
+.thumb.no-chart { border: 1px dashed var(--slot-line); display: grid; place-items: center; font-size: var(--fs-slot); color: var(--text-muted); }
+
+/* развёрнутый вид: слой между стрелками модалки (101) и диалогом (150) */
+.zoom-overlay { z-index: 120; }
+.zoom-box { position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%); }
+.zoom-box img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; display: block; }
+#z-img { opacity: 0; transition: opacity .12s; }
+#z-img.ready { opacity: 1; }

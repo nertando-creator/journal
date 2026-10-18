@@ -51,13 +51,20 @@
   <div id="modal-box" class="modal">
     <div class="m-left">
       <div class="m-frame">
+        <div class="m-main">
+        <div id="m-empty" class="m-empty" hidden><span id="m-empty-text"></span></div>
         <div id="m-imgbox" class="m-imgbox">
         <img id="m-img-prev" alt="" draggable="false">
         <img id="m-img" alt="" draggable="false">
         <button id="m-trash" class="trash" title="Удалить навсегда">
           <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18M8 6V4h8v2M6 6l1 14h10l1-14M10 10v7M14 10v7"/></svg>
         </button>
+        <button id="m-extra-del" class="trash extra-del" title="Удалить запасную картинку" hidden>
+          <svg viewBox="0 0 10 10" width="12" height="12"><path d="M1 1l8 8M9 1l-8 8" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg>
+        </button>
         </div>
+        </div>
+        <div id="m-side" class="m-side"></div>
       </div>
     </div>
     <div class="m-right">
@@ -90,7 +97,7 @@
           <div class="m-sel-cell">
             <div class="m-label">Дата</div>
             <div class="m-date-wrap">
-              <input id="m-date" class="m-date" type="datetime-local" autocomplete="off">
+              <input id="m-date" class="m-date" type="text" inputmode="numeric" maxlength="16" placeholder="ДД.ММ.ГГГГ ЧЧ:ММ" spellcheck="false" autocomplete="off">
               <button type="button" id="m-date-clear" class="m-date-clear" title="Очистить дату" aria-label="Очистить дату"><svg viewBox="0 0 10 10" width="8" height="8"><path d="M1 1l8 8M9 1l-8 8" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg></button>
             </div>
           </div>
@@ -103,12 +110,19 @@
         </div>
         <div id="m-coin" class="m-coin"></div>
       </div>
-      <div id="m-slots" class="m-slots" hidden></div>
       <div class="m-comment">
         <div class="m-label m-label-row"><span>Комментарий</span><span id="comment-state" class="save-state"></span></div>
         <textarea id="m-comment" class="m-comment-text scrolly" autocomplete="off"></textarea>
       </div>
     </div>
+  </div>
+</div>
+
+<!-- ===== РАЗВЁРНУТЫЙ ВИД ===== -->
+<div id="zoom" class="overlay zoom-overlay" hidden>
+  <div id="zoom-box" class="zoom-box">
+    <img id="z-prev" alt="" draggable="false">
+    <img id="z-img" alt="" draggable="false">
   </div>
 </div>
 

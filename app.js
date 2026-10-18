@@ -1,5 +1,5 @@
 /* app.js — интерфейс. С Supabase общается только через DB (storage.js). */
-const APP_VERSION = 'v4.5';
+const APP_VERSION = 'v4.6';
 const CFG = window.APP_CONFIG;
 let viewMode = 'gallery';                // какое окно открыто: 'gallery' (Формации) или 'market' (График); меняет market.js
 const $ = (s, r = document) => r.querySelector(s);
@@ -293,7 +293,7 @@ async function loadImages({ quiet = false } = {}) {
     const rows = await DB.listImages(folder);
     const t1 = performance.now();
     const had = rows.filter((r) => hasUrl(r.preview_path)).length;
-    await ensureUrls(rows.flatMap((r) => [r.preview_path, r.chart_preview_path]));
+    await ensureUrls(rows.map(cardPath).filter(Boolean));
     const t2 = performance.now();
     if (seq !== state.loadSeq) return;        // успели переключить вкладку
     state.loadFailed = false;
@@ -341,22 +341,39 @@ function skeletonCard() {
   c.innerHTML = '<div class="thumb loading"></div><div class="cap sk"></div>';
   return c;
 }
+// Картинка карточки: при включённых слотах только «Основная» (chart_preview_path); без колонок слотов как в v4.2 (превью оригинала)
+const cardPath = (im) => (DB.slotsOn() ? im.chart_preview_path : im.preview_path);
 function imageCard(im) {
   const c = el('div', 'card'); c.dataset.id = im.id;
   c.innerHTML = `<div class="thumb"><img alt="" draggable="false"><button class="trash" title="Удалить навсегда">${ICON_TRASH}</button></div><div class="cap"></div>`;
-  const img = $('img', c), thumb = $('.thumb', c);
-  img.style.setProperty('--w', im.width || 235);
-  img.style.setProperty('--h', im.height || 153);
-  img.loading = 'lazy';
-  const known = urlCache.get(im.preview_path);
-  if (!(known && wasLoaded(known.url))) thumb.classList.add('loading');   // мягкая заглушка, пока превью грузится
-  img.addEventListener('load', () => { thumb.classList.remove('loading'); markLoaded(img.currentSrc || img.src); });
-  img.addEventListener('error', () => thumb.classList.remove('loading'));
-  bindImg(img, im.preview_path);
+  const img = $('img', c), thumb = $('.thumb', c), path = cardPath(im);
+  if (!path) {                                              // нет основной: пустая рамка, оригинал в карточке не показываем
+    img.remove(); thumb.classList.add('no-chart');
+    thumb.insertBefore(el('span', '', 'Нет графика'), thumb.firstChild);
+  } else {
+    // размеры основной в базе не хранятся: рамка заполняется целиком, картинка вписывается без искажений
+    img.style.setProperty('--w', DB.slotsOn() ? 99999 : (im.width || 235));
+    img.style.setProperty('--h', DB.slotsOn() ? 99999 : (im.height || 153));
+    img.loading = 'lazy';
+    const known = urlCache.get(path);
+    if (!(known && wasLoaded(known.url))) thumb.classList.add('loading');   // мягкая заглушка, пока превью грузится
+    img.addEventListener('load', () => { thumb.classList.remove('loading'); markLoaded(img.currentSrc || img.src); });
+    img.addEventListener('error', () => thumb.classList.remove('loading'));
+    bindImg(img, path);
+  }
+  if (im.is_favorite && DB.slotsOn()) thumb.appendChild(starEl());          // со слотами; без колонок карточка как в v4.2
   $('.cap', c).textContent = im.title || 'Без названия';
   c.addEventListener('click', () => openModal(im.id));
   $('.trash', c).addEventListener('click', (e) => { e.stopPropagation(); deleteImage(im.id); });
   return c;
+}
+const STAR_SVG = '<svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 2.5l2.9 6.1 6.6.8-4.9 4.6 1.3 6.6L12 17.3 6.1 20.6l1.3-6.6L2.5 9.4l6.6-.8z"/></svg>';
+const starEl = () => { const e = el('span', 'card-star'); e.innerHTML = STAR_SVG; return e; };
+function updateCardStar(id) {                               // избранное переключили в модалке: звезда на карточке
+  const im = state.images.find((x) => x.id === id), thumb = $(`.card[data-id="${id}"] .thumb`);
+  if (!im || !thumb || !DB.slotsOn()) return;
+  const have = thumb.querySelector('.card-star');
+  if (im.is_favorite && !have) thumb.appendChild(starEl()); else if (!im.is_favorite && have) have.remove();
 }
 function pendingCard(p) {
   const c = el('div', 'card pending' + (p.error ? ' failed' : ''));
@@ -709,9 +726,10 @@ function fitModal() {
   $('#modal').style.setProperty('--nav-x', ((W - mw * k) / 4) + 'px');
 }
 // Невидимая область 944×609: картинка вписывается, центрируется, не больше 1.5× натурального
+const mainW = () => (DB.slotsOn() ? cssNum('--m-main-w') : cssNum('--frame-w'));   // со слотами большая картинка делит область с колонкой миниатюр
 function sizeModalImage(im) {
   const w = im.width || 1, h = im.height || 1;
-  const s = Math.min(cssNum('--frame-w') / w, cssNum('--frame-h') / h, 1.5);
+  const s = Math.min(mainW() / w, cssNum('--frame-h') / h, 1.5);
   const box = $('#m-imgbox');
   box.style.width = Math.round(w * s) + 'px';
   box.style.height = Math.round(h * s) + 'px';
@@ -721,38 +739,47 @@ function sizeModalImage(im) {
 const SLOTS = [
   { id: 'chart', label: 'Основная', none: 'Нет основной' },
   { id: 'original', label: 'Оригинал', none: 'Нет оригинала' },
-  { id: 'extra', label: 'Запасная', none: 'Пусто. Клик, затем Ctrl+V' }
+  { id: 'extra', label: 'Запасная', none: 'Нет запасной' }
 ];
-let viewSlot = 'original';        // какой слот сейчас показан слева
-let armedSlot = null;             // выбранный для вставки пустой слот ('extra') или null
+let viewSlot = 'original';        // какой слот сейчас большой
 const slotPaths = (im, slot) => (slot === 'chart' ? { full: im.chart_path, prev: im.chart_preview_path }
   : slot === 'extra' ? { full: im.extra_path, prev: im.extra_preview_path } : { full: im.original_path, prev: im.preview_path });
 const slotFilled = (im, slot) => !!slotPaths(im, slot).full;
 const defaultSlot = (im) => (DB.slotsOn() && slotFilled(im, 'chart') ? 'chart' : 'original');
 const allImagePaths = (im) => [im.original_path, im.preview_path, im.chart_path, im.chart_preview_path, im.extra_path, im.extra_preview_path].filter(Boolean);
+// Вставка и перетаскивание при открытой модалке работают только когда большим выбрана пустая «Запасная»
+function pasteTarget() {
+  const im = isModalOpen() ? curImage() : null;
+  return !!(im && DB.slotsOn() && viewSlot === 'extra' && !slotFilled(im, 'extra') && !(im._busy && im._busy.extra));
+}
 function sizeBox(w, h, cap) {
-  const s = Math.min(cssNum('--frame-w') / w, cssNum('--frame-h') / h, cap);
+  const s = Math.min(mainW() / w, cssNum('--frame-h') / h, cap);
   const box = $('#m-imgbox');
   box.style.width = Math.round(w * s) + 'px'; box.style.height = Math.round(h * s) + 'px';
 }
-// Показ слота слева: превью сразу (оно уже в кэше), оригинал поверх, когда догрузится
-function showSlot(im, slot, initial) {
+// Большая картинка: превью сразу (оно уже в кэше), оригинал поверх, когда догрузится. Пустой слот: пунктирная рамка с подсказкой.
+function showSlot(im, slot) {
   const id = im.id, { full, prev: pp } = slotPaths(im, slot);
-  if (!full) return;
   viewSlot = slot;
   const img = $('#m-img'), prev = $('#m-img-prev');
   img.onload = null; prev.onload = null;
   img.classList.remove('ready'); img.removeAttribute('src'); delete img.dataset.retry;
   prev.removeAttribute('src');
+  renderSlots(im);
+  if (!full) {
+    modalPath = null;
+    $('#m-imgbox').hidden = true; $('#m-empty').hidden = false;
+    $('#m-empty-text').textContent = pasteTarget() ? 'Ctrl+V или перетащи файл' : SLOTS.find((x) => x.id === slot).none;
+    if (isZoomOpen()) closeZoom();
+    return;
+  }
+  $('#m-imgbox').hidden = false; $('#m-empty').hidden = true;
   modalPath = full;
   if (slot === 'original') sizeModalImage(im);
-  else {                                                   // размеры других слотов в базе не хранятся: берём из загруженной картинки
+  else {                                                   // размеры не-оригинальных слотов в базе не хранятся: берём из загруженной картинки
     sizeBox(4, 3, 99);
     prev.onload = () => { if (state.modalId === id && viewSlot === slot && prev.naturalWidth) sizeBox(prev.naturalWidth, prev.naturalHeight, 99); };
   }
-  renderSlots(im);
-  const pc = pp && urlCache.get(pp);
-  if (pc) prev.src = pc.url;
   const t0 = performance.now(), cached = hasUrl(full);
   const showFull = () => {
     if (state.modalId !== id || viewSlot !== slot) return;
@@ -766,25 +793,29 @@ function showSlot(im, slot, initial) {
       if (slot !== 'original' && img.naturalWidth) sizeBox(img.naturalWidth, img.naturalHeight, 1.5);
       img.classList.add('ready'); markLoaded(c.url);
       logI(`⏱ Открыто «${im.title || 'Без названия'}» (${SLOTS.find((x) => x.id === slot).label}): ссылка ${ms(t1 - t0)} мс${cached ? ' (из кэша)' : ''}, оригинал ${ms(performance.now() - t1)} мс`);
+      if (isZoomOpen()) renderZoom();
     };
     img.src = c.url;
   };
-  if (cached) showFull(); else ensureUrls(allImagePaths(im)).then(showFull);
+  const pc = pp && urlCache.get(pp);
+  if (pc) prev.src = pc.url;
+  if (cached) showFull(); else ensureUrls([pp, full].filter(Boolean)).then(showFull);   // ссылки на остальные слоты подписываются по требованию
+  if (isZoomOpen()) renderZoom();
 }
-function openModal(id) {
+function openModal(id, keepSlot) {
   const im = state.images.find((x) => x.id === id);
   if (!im) return;
+  const prevSlot = viewSlot;
   flushAll();                      // дописать всё несохранённое по предыдущей картинке (запись знает свой id)
   closeMenu();
   state.modalId = id;
   purgeMoved(id);
   $('#modal').hidden = false;
   fitModal();
-  armedSlot = null;
   saver.saved.delete(saveKey(id, 'comment'));
   fillPanel(im);
   updateNav();
-  showSlot(im, defaultSlot(im), true);
+  showSlot(im, keepSlot && DB.slotsOn() && slotFilled(im, prevSlot) ? prevSlot : defaultSlot(im));
   // соседние картинки (предыдущая и следующая): оригиналы подписываем и догружаем заранее
   const i = state.images.findIndex((x) => x.id === id);
   const near = [state.images[i - 1], state.images[i + 1]].filter(Boolean).map((x) => x.original_path);
@@ -794,7 +825,8 @@ function closeModal() {
   if (!isModalOpen()) return;
   flushAll(); closeMenu();
   $('#modal').hidden = true;
-  state.modalId = null; modalPath = null; armedSlot = null;
+  closeZoom();
+  state.modalId = null; modalPath = null;
   purgeMoved(null);                // перенесённые картинки исчезают из сетки этой вкладки
 }
 function updateNav() {
@@ -802,10 +834,10 @@ function updateNav() {
   $('#nav-prev').disabled = i <= 0;
   $('#nav-next').disabled = i < 0 || i >= state.images.length - 1;
 }
-function step(d) {
+function step(d, keepSlot) {
   const i = state.images.findIndex((x) => x.id === state.modalId);
   const n = state.images[i + d];
-  if (n) openModal(n.id);
+  if (n) openModal(n.id, keepSlot);
 }
 
 /* ---------- правая панель ---------- */
@@ -819,20 +851,29 @@ function fillPanel(im) {
 }
 /* ---------- Дата, ТФ, монета ---------- */
 const pad2 = (n) => String(n).padStart(2, '0');
-function isoToLocalInput(iso) {              // UTC из базы → местное время браузера для datetime-local
+function isoToDateText(iso) {                // UTC из базы → «ДД.ММ.ГГГГ ЧЧ:ММ» в местном времени браузера
   if (!iso) return '';
   const d = new Date(iso); if (isNaN(d)) return '';
-  return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}T${pad2(d.getHours())}:${pad2(d.getMinutes())}`;
+  return `${pad2(d.getDate())}.${pad2(d.getMonth() + 1)}.${d.getFullYear()} ${pad2(d.getHours())}:${pad2(d.getMinutes())}`;
 }
-function localInputToIso(v) {                // местное время из поля → UTC для базы
-  if (!v) return null;
-  const d = new Date(v); return isNaN(d) ? null : d.toISOString();
+// «ДД.ММ.ГГГГ[ ЧЧ:ММ]» (местное время; без времени = 00:00) → { ok, iso }. Пусто = ok с null. Несуществующая дата = не ok.
+function parseDateText(text) {
+  const t = String(text || '').trim();
+  if (!t) return { ok: true, iso: null };
+  const m = t.match(/^(\d{1,2})\.(\d{1,2})\.(\d{4})(?:\s+(\d{1,2}):(\d{2}))?$/);
+  if (!m) return { ok: false };
+  const [dd, mo, yy, hh, mi] = [+m[1], +m[2], +m[3], +(m[4] || 0), +(m[5] || 0)];
+  if (yy < 1970 || yy > 2100) return { ok: false };
+  const d = new Date(yy, mo - 1, dd, hh, mi);
+  if (d.getFullYear() !== yy || d.getMonth() !== mo - 1 || d.getDate() !== dd || d.getHours() !== hh || d.getMinutes() !== mi) return { ok: false };   // 31.02, 25:00, время, которого нет при переводе часов
+  return { ok: true, iso: d.toISOString() };
 }
 function renderMeta(im) {
   const on = DB.slotsOn();
-  $('#m-meta').hidden = !on; $('#m-slots').hidden = !on;
+  $('#m-meta').hidden = !on;
   if (!on) return;
-  $('#m-date').value = isoToLocalInput(im.range_to);
+  $('#m-date').value = isoToDateText(im.range_to);
+  $('#m-date').classList.remove('invalid');
   const v = $('#tf-select .sel-val'); v.textContent = '';
   if (im.timeframe) v.appendChild(chipEl(im.timeframe)); else v.appendChild(el('span', 'dash', '—'));
   renderCoin(im);
@@ -860,7 +901,7 @@ function setDate(iso) {
   const id = state.modalId, im = curImage();
   if (!im || (im.range_to || null) === iso) return;
   im.range_to = iso;
-  queueSave(id, 'range_to', iso);
+  queueSave(id, 'range_to', iso, { delay: 700 });
 }
 // Название изменилось: пересчитать монету (symbol в базе) и, если ТФ пуст, подставить его из названия (выбранный вручную не трогаем)
 function syncFromTitle(id, im) {
@@ -871,18 +912,23 @@ function syncFromTitle(id, im) {
   else if (state.modalId === id) renderCoin(im);
 }
 
-/* ---------- миниатюры слотов ---------- */
-function renderSlots(im) {
-  const box = $('#m-slots'); box.textContent = '';
-  if (!DB.slotsOn()) return;
-  SLOTS.forEach((sl) => {
+/* ---------- колонка миниатюр слева: два слота, которые сейчас не большие (порядок Основная, Оригинал, Запасная) ---------- */
+function renderSlots(im, noEnsure) {
+  const side = $('#m-side'); side.textContent = '';
+  const on = DB.slotsOn();
+  $('#modal').classList.toggle('slots-off', !on);
+  $('#m-extra-del').hidden = !(on && viewSlot === 'extra' && slotFilled(im, 'extra'));
+  if (!on) return;
+  const miss = [];
+  SLOTS.filter((sl) => sl.id !== viewSlot).forEach((sl) => {
     const filled = slotFilled(im, sl.id), busy = !!(im._busy && im._busy[sl.id]);
     const cell = el('div', 'slot-cell');
-    const t = el('div', 'slot' + (filled ? '' : ' empty') + (viewSlot === sl.id && filled ? ' view' : '') + (armedSlot === sl.id ? ' armed' : '') + (busy ? ' busy' : ''));
+    const t = el('div', 'slot' + (filled ? '' : ' empty') + (busy ? ' busy' : ''));
     t.dataset.slot = sl.id;
     if (filled) {
       const img = el('img'); img.alt = ''; img.draggable = false;
-      const p = slotPaths(im, sl.id).prev; if (p) bindImg(img, p);
+      const p = slotPaths(im, sl.id).prev;
+      if (p) { if (!hasUrl(p)) miss.push(p); bindImg(img, p); }
       t.appendChild(img);
     } else t.appendChild(el('span', 'slot-hint', busy ? 'Загрузка…' : sl.none));
     if (sl.id === 'extra' && filled) {
@@ -890,30 +936,61 @@ function renderSlots(im) {
       x.addEventListener('click', (e) => { e.stopPropagation(); removeExtra(im.id); });
       t.appendChild(x);
     }
-    t.addEventListener('click', () => onSlotClick(im.id, sl.id));
-    if (sl.id === 'extra') {
-      t.addEventListener('dragover', (e) => { if (armedSlot === 'extra' && !filled && e.dataTransfer && [...e.dataTransfer.types].includes('Files')) { e.preventDefault(); e.stopPropagation(); t.classList.add('dropping'); } });
-      t.addEventListener('dragleave', () => t.classList.remove('dropping'));
-      t.addEventListener('drop', (e) => {
-        t.classList.remove('dropping');
-        if (armedSlot !== 'extra' || filled) return;               // слот не выбран: перетаскивание игнорируется
-        e.preventDefault(); e.stopPropagation();
-        const files = [...e.dataTransfer.files].filter((f) => mimeOf(f) || f.type.startsWith('image/'));
-        if (files.length) addExtraFile(im.id, files[0]);
-      });
-    }
+    t.addEventListener('click', () => selectSlot(sl.id));
     cell.appendChild(t);
-    cell.appendChild(el('div', 'slot-label' + (viewSlot === sl.id && filled ? ' view' : ''), sl.label));
-    box.appendChild(cell);
+    cell.appendChild(el('div', 'slot-label', sl.label));
+    side.appendChild(cell);
   });
+  if (miss.length && !noEnsure) ensureUrls(miss).then(() => { if (state.modalId === im.id) renderSlots(im, true); });   // подписываем по требованию
 }
-function onSlotClick(id, slot) {
-  const im = curImage(); if (!im || im.id !== id) return;
-  if (slotFilled(im, slot)) { armedSlot = null; if (viewSlot !== slot) showSlot(im, slot); else renderSlots(im); return; }
-  armedSlot = slot === 'extra' ? (armedSlot === 'extra' ? null : 'extra') : null;   // пустую «Запасную» можно выбрать для вставки
-  renderSlots(im);
+// Клик по миниатюре или клавиши 1/2/3: слот становится большим (пустой тоже: показывается рамка с подсказкой)
+function selectSlot(slot) {
+  const im = curImage();
+  if (!im || !DB.slotsOn() || slot === viewSlot) return;
+  showSlot(im, slot);
 }
-function switchSlot(slot) { const im = curImage(); if (im && DB.slotsOn() && slotFilled(im, slot)) { armedSlot = null; showSlot(im, slot); } }
+const switchSlot = selectSlot;
+
+/* ---------- развёрнутый вид (клик по большой картинке или F) ---------- */
+const isZoomOpen = () => !$('#zoom').hidden;
+function zoomSize(w, h) {
+  const k = parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--zoom-share')) || 0.8;
+  const W = document.documentElement.clientWidth, H = document.documentElement.clientHeight;
+  const s = Math.min((W * k) / w, (H * k) / h);
+  const box = $('#zoom-box'); box.style.width = Math.round(w * s) + 'px'; box.style.height = Math.round(h * s) + 'px';
+}
+// Берём превью сразу, полный размер поверх; позиционирование от окна, масштаб модалки не влияет
+function renderZoom() {
+  const im = curImage(); if (!im) return;
+  const { full, prev: pp } = slotPaths(im, viewSlot);
+  if (!full) { closeZoom(); return; }
+  const zi = $('#z-img'), zp = $('#z-prev');
+  zi.onload = zp.onload = null;
+  zi.classList.remove('ready'); zi.removeAttribute('src'); zp.removeAttribute('src');
+  if (viewSlot === 'original' && im.width && im.height) zoomSize(im.width, im.height); else zoomSize(4, 3);
+  const id = im.id, slot = viewSlot;
+  const pc = pp && urlCache.get(pp);
+  zp.onload = () => { if (viewSlot === slot && state.modalId === id && !(slot === 'original' && im.width) && zp.naturalWidth) zoomSize(zp.naturalWidth, zp.naturalHeight); };
+  if (pc) zp.src = pc.url;
+  const go = () => {
+    if (state.modalId !== id || viewSlot !== slot || !isZoomOpen()) return;
+    const c = urlCache.get(full); if (!c) return;
+    zi.onload = () => { if (state.modalId !== id || viewSlot !== slot) return; if (zi.naturalWidth) zoomSize(zi.naturalWidth, zi.naturalHeight); zi.classList.add('ready'); markLoaded(c.url); };
+    zi.src = c.url;
+  };
+  if (hasUrl(full)) go(); else ensureUrls([pp, full].filter(Boolean)).then(() => { if (pp && !zp.getAttribute('src') && urlCache.get(pp)) zp.src = urlCache.get(pp).url; go(); });
+}
+function openZoom() {
+  const im = curImage();
+  if (!im || !isModalOpen() || !DB.slotsOn() || !slotFilled(im, viewSlot)) return;
+  $('#zoom').hidden = false; renderZoom();
+}
+function closeZoom() {
+  if (!isZoomOpen()) return;
+  $('#zoom').hidden = true;
+  $('#z-img').removeAttribute('src'); $('#z-prev').removeAttribute('src');
+}
+
 async function addExtraFile(id, file) {
   const im = state.images.find((x) => x.id === id);
   if (!im || slotFilled(im, 'extra') || (im._busy && im._busy.extra)) return;
@@ -921,8 +998,7 @@ async function addExtraFile(id, file) {
   if (!mime) { skipFile(`${name}: формат не поддерживается (нужны PNG, JPG, WebP)`); return; }
   if (file.size > max) { skipFile(`${name}: больше ${CFG.MAX_FILE_MB} МБ (${(file.size / 1048576).toFixed(1)} МБ)`); return; }
   im._busy = Object.assign(im._busy || {}, { extra: true });
-  armedSlot = null;
-  if (state.modalId === id) renderSlots(im);
+  if (state.modalId === id) showSlot(im, viewSlot);
   try {
     const { preview } = await makePreview(file);
     const patch = await DB.addSlotImage(id, 'extra', file, mime, preview, MIME_EXT[mime]);
@@ -935,7 +1011,7 @@ async function addExtraFile(id, file) {
     toast('Не удалось добавить запасную картинку');
   } finally {
     im._busy.extra = false;
-    if (state.modalId === id) renderSlots(im);
+    if (state.modalId === id) showSlot(im, viewSlot);
   }
 }
 async function removeExtra(id) {
@@ -952,13 +1028,13 @@ async function removeExtra(id) {
     logE(errMsg(e));
     if (/файлы остались/.test(errMsg(e))) { im.extra_path = im.extra_preview_path = im.extra_size = null; addUsage({ extra_size: bytes }, -1); }
     toast('Ошибка при удалении запасной, подробности в логах');
-    if (state.modalId === id) renderSlots(im);
+    if (state.modalId === id) showSlot(im, viewSlot);
     return;
   }
   im.extra_path = im.extra_preview_path = im.extra_size = null;
   addUsage({ extra_size: bytes }, -1);
   logI(`Запасная картинка удалена: «${im.title || 'Без названия'}»`);
-  if (viewSlot === 'extra' && state.modalId === id) showSlot(im, defaultSlot(im)); else if (state.modalId === id) renderSlots(im);
+  if (state.modalId === id) showSlot(im, viewSlot === 'extra' ? 'extra' : viewSlot);   // после удаления большая «Запасная» становится пустой с подсказкой
 }
 
 function chipEl(text, { color = null, sm = false, removeTag = null } = {}) {
@@ -1072,6 +1148,7 @@ function toggleStar() {
   im.is_favorite = !im.is_favorite;
   $('#m-star').classList.toggle('on', im.is_favorite);
   queueSave(id, 'is_favorite', im.is_favorite);
+  updateCardStar(id);
 }
 function setStatus(v) {
   const id = state.modalId, im = curImage();
@@ -1133,8 +1210,19 @@ function bindPanel() {
   $('#status-host').addEventListener('click', (e) => { if (!inMenu(e)) toggleMenu('status', $('#status-host'), renderStatusMenu, 'match'); });
   $('#folder-host').addEventListener('click', (e) => { if (!inMenu(e)) toggleMenu('folder', $('#folder-host'), renderFolderMenu, 'match right'); });
   $('#tf-host').addEventListener('click', (e) => { if (!inMenu(e)) toggleMenu('tf', $('#tf-host'), renderTfMenu, 'match'); });
-  $('#m-date').addEventListener('change', () => setDate(localInputToIso($('#m-date').value)));
-  $('#m-date-clear').addEventListener('click', () => { $('#m-date').value = ''; setDate(null); });
+  const dateEl = $('#m-date');
+  dateEl.addEventListener('input', () => {                    // верно: сохраняем (с задержкой); неверно: красный контур, не сохраняем
+    const r = parseDateText(dateEl.value);
+    dateEl.classList.toggle('invalid', !r.ok);
+    if (r.ok) setDate(r.iso);
+  });
+  dateEl.addEventListener('blur', () => {
+    const r = parseDateText(dateEl.value), im = curImage();
+    if (!r.ok) { logW(`Дата не сохранена: «${dateEl.value}» не похоже на ДД.ММ.ГГГГ ЧЧ:ММ или такой даты нет${im ? ` («${im.title || 'Без названия'}»)` : ''}`); return; }
+    if (im) dateEl.value = isoToDateText(im.range_to);          // привести к единому виду
+    dateEl.classList.remove('invalid');
+  });
+  $('#m-date-clear').addEventListener('click', () => { dateEl.value = ''; dateEl.classList.remove('invalid'); setDate(null); });
   const c = $('#m-comment');
   c.addEventListener('input', () => {
     const id = state.modalId, im = curImage(); if (!im) return;
@@ -1363,11 +1451,11 @@ async function prefetchAll() {
     keys.forEach((k) => { if (k !== state.activeFolder && !tabCache.has(k)) tabCache.set(k, groups.get(k) || []); });
     const others = keys.filter((k) => k !== state.activeFolder).flatMap((k) => groups.get(k) || []);
     const t1 = performance.now();
-    await ensureUrls(others.flatMap((r) => [r.preview_path, r.chart_preview_path, r.extra_preview_path]));
+    await ensureUrls(others.map(cardPath).filter(Boolean));       // только то, что рисуется в сетке; остальные слоты подписываются при открытии записи
     const t2 = performance.now();
-    await preloadMany(others.flatMap((r) => [r.preview_path, r.chart_preview_path].filter(Boolean)));
+    await preloadMany(others.map(cardPath).filter(Boolean));
     const t3 = performance.now();
-    await ensureUrls(rows.flatMap((r) => [r.original_path, r.chart_path, r.extra_path]));       // оригиналы только подписываем, не качаем
+    if (!DB.slotsOn()) await ensureUrls(rows.map((r) => r.original_path));       // как в v4.2: оригиналы подписываем заранее (со слотами это делается при открытии записи)
     logI(`⏱ Фон: списки ${ms(t1 - t0)} мс, ссылки на превью ${ms(t2 - t1)} мс, превью скачано ${others.length} шт. за ${ms(t3 - t2)} мс, ссылки на оригиналы ${ms(performance.now() - t3)} мс`);
   } catch (e) { logE(`Фоновая подгрузка: ${errMsg(e)}`); }
   finally { prefetching = false; }
@@ -1456,7 +1544,16 @@ function bindUI() {
   $('#m-star').onclick = toggleStar;
   bindPanel();
   bindTabDrag();
-  $('#m-trash').onclick = () => deleteImage(state.modalId);
+  $('#m-trash').onclick = (e) => { e.stopPropagation(); deleteImage(state.modalId); };
+  $('#m-extra-del').onclick = (e) => { e.stopPropagation(); removeExtra(state.modalId); };
+  $('#m-imgbox').addEventListener('click', (e) => { if (!e.target.closest('button')) openZoom(); });   // клик по большой картинке: развернуть
+  const emp = $('#m-empty');
+  emp.addEventListener('dragover', (e) => { if (pasteTarget() && e.dataTransfer && [...e.dataTransfer.types].includes('Files')) emp.classList.add('dropping'); });
+  emp.addEventListener('dragleave', () => emp.classList.remove('dropping'));
+  emp.addEventListener('drop', () => emp.classList.remove('dropping'));
+  const zo = $('#zoom');
+  zo.addEventListener('click', (e) => { if (e.target === zo) closeZoom(); });                        // клик вне картинки закрывает
+  zo.addEventListener('wheel', (e) => e.preventDefault(), { passive: false });
   $('#m-img').addEventListener('error', async () => {
     const img = $('#m-img');
     if (!modalPath || !img.getAttribute('src')) return;
@@ -1475,13 +1572,23 @@ function bindUI() {
 
   // клавиши
   window.addEventListener('keydown', (e) => {
+    if (isZoomOpen()) {                                                  // развёрнутый вид: Esc закрывает первым
+      if (e.key === 'Escape' || (e.key.toLowerCase() === 'f' || e.key === 'а' || e.key === 'А') && !e.ctrlKey && !e.metaKey && !e.altKey) { e.preventDefault(); closeZoom(); }
+      else if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') { e.preventDefault(); step(e.key === 'ArrowLeft' ? -1 : 1, true); }
+      else if (['1', '2', '3'].includes(e.key) && !e.ctrlKey && !e.metaKey && !e.altKey) {
+        e.preventDefault(); const im = curImage(), sl = ['chart', 'original', 'extra'][Number(e.key) - 1];
+        if (im && DB.slotsOn() && slotFilled(im, sl)) selectSlot(sl);
+      }
+      return;
+    }
     if (activeDialog) { if (e.key === 'Escape') { e.preventDefault(); activeDialog.cancel(); } return; }
     if (viewMode !== 'gallery') return;                                  // открыт «График»: клавиши галереи не действуют
     if (state.menu) { if (e.key === 'Escape') { e.preventDefault(); closeMenu(); } return; }   // Esc: сначала список, потом модалка
     if (isModalOpen()) {
       if (e.key === 'Escape') { e.preventDefault(); closeModal(); }
       else if ((e.key === 'ArrowLeft' || e.key === 'ArrowRight') && !isTyping(e.target)) { e.preventDefault(); step(e.key === 'ArrowLeft' ? -1 : 1); }
-      else if (['1', '2', '3'].includes(e.key) && !isTyping(e.target) && !e.ctrlKey && !e.metaKey && !e.altKey) { e.preventDefault(); switchSlot(['chart', 'original', 'extra'][Number(e.key) - 1]); }
+      else if (['1', '2', '3'].includes(e.key) && !isTyping(e.target) && !e.ctrlKey && !e.metaKey && !e.altKey) { e.preventDefault(); selectSlot(['chart', 'original', 'extra'][Number(e.key) - 1]); }
+      else if ((e.key.toLowerCase() === 'f' || e.key === 'а' || e.key === 'А') && !isTyping(e.target) && !e.ctrlKey && !e.metaKey && !e.altKey) { e.preventDefault(); openZoom(); }
       return;
     }
     if (e.key === 'F2' && !$('#app').hidden && state.activeFolder !== null && !isTyping(e.target)) { e.preventDefault(); startRename(state.activeFolder); }
@@ -1493,6 +1600,11 @@ function bindUI() {
   window.addEventListener('drop', (e) => {
     if (!hasFiles(e)) return;
     e.preventDefault();
+    if (!$('#app').hidden && viewMode === 'gallery' && !activeDialog && !isZoomOpen() && pasteTarget()) {   // большим выбрана пустая «Запасная»
+      const f = [...e.dataTransfer.files].filter((x) => mimeOf(x) || x.type.startsWith('image/'));
+      if (f.length) addExtraFile(state.modalId, f[0]);
+      return;
+    }
     if (!canAdd()) { logI('Перетаскивание проигнорировано (открыто окно, «График» или нет входа)'); return; }
     processFiles([...e.dataTransfer.files], 'drop');
   });
@@ -1500,7 +1612,7 @@ function bindUI() {
   window.addEventListener('paste', (e) => {
     const files = [...((e.clipboardData && e.clipboardData.files) || [])].filter((f) => f.type.startsWith('image/'));
     if (!files.length || isTyping(e.target)) return;
-    if (!$('#app').hidden && viewMode === 'gallery' && isModalOpen() && !activeDialog && armedSlot === 'extra' && DB.slotsOn()) {   // выбран пустой слот «Запасная»
+    if (!$('#app').hidden && viewMode === 'gallery' && isModalOpen() && !activeDialog && pasteTarget()) {   // большим выбрана пустая «Запасная»
       e.preventDefault(); addExtraFile(state.modalId, files[0]); return;
     }
     if (!canAdd()) return;
