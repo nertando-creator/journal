@@ -244,6 +244,39 @@
         throw e;
       }
     },
+    // Замена «Основной» (построение графика): новые файлы с новыми именами → строка → и только потом удаление старых файлов.
+    // Результат относится к записи id, а не к открытой сейчас. Если записи уже нет, новые файлы удаляются (ошибка с code 'GONE').
+    async replaceChart(imageId, file, previewBlob, params) {
+      const { data: { session } } = await sb.auth.getSession();
+      if (!session) fail('Нет сессии', 'войди заново');
+      const cur = await attemptNet('чтение записи', () => sb.from('images').select('id,chart_path,chart_preview_path,chart_size').eq('id', imageId).maybeSingle());
+      if (cur.error) fail('База: чтение записи', cur.error);
+      if (!cur.data) throw Object.assign(new Error('Запись удалена, новые файлы не загружались'), { code: 'GONE' });
+      const old = [cur.data.chart_path, cur.data.chart_preview_path].filter(Boolean);
+      const uid = session.user.id, tag = crypto.randomUUID();
+      const fullPath = `${uid}/chart/${tag}.png`, prevPath = `${uid}/chart_preview/${tag}.webp`;
+      const uploaded = [];
+      try {
+        for (const [path, blob, type] of [[fullPath, file, 'image/png'], [prevPath, previewBlob, previewBlob.type || 'image/webp']]) {
+          const r = await attemptNet('загрузка файла', () => sb.storage.from(cfg.BUCKET).upload(path, blob, { contentType: type, upsert: true, cacheControl: CACHE_CONTROL }));
+          if (r.error) fail(`Хранилище: загрузка ${path}`, r.error);
+          uploaded.push(path);
+        }
+        const patch = { chart_path: fullPath, chart_preview_path: prevPath, chart_size: file.size, chart_params: params };
+        const r = await attemptNet('запись в базу', () => sb.from('images').update(patch).eq('id', imageId).select('id'));
+        if (r.error) fail('База: запись основной картинки', r.error);
+        if (!r.data || !r.data.length) throw Object.assign(new Error('Запись удалена во время построения, новые файлы удалены'), { code: 'GONE' });
+        let oldFail = null;
+        if (old.length) {
+          const res = await sb.storage.from(cfg.BUCKET).remove(old);
+          if (res.error) oldFail = `Старые файлы основной остались в хранилище (${old.join(', ')}): ${describe(res.error)}`;
+        }
+        return { patch, oldSize: cur.data.chart_size || 0, oldFail };
+      } catch (e) {
+        if (uploaded.length && !e.transient) await sb.storage.from(cfg.BUCKET).remove(uploaded);   // при обрыве связи файлы не трогаем: неизвестно, записалась ли строка
+        throw e;
+      }
+    },
     // Очищает слот: сначала строка (поля в null), потом файлы. Если файлы не удалились, ошибка с путями.
     async removeSlotImage(img, slot) {
       const paths = [img[slot + '_path'], img[slot + '_preview_path']].filter(Boolean);

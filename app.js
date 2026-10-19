@@ -1,5 +1,5 @@
 /* app.js — интерфейс. С Supabase общается только через DB (storage.js). */
-const APP_VERSION = 'v4.6';
+const APP_VERSION = 'v5.0';
 const CFG = window.APP_CONFIG;
 let viewMode = 'gallery';                // какое окно открыто: 'gallery' (Формации) или 'market' (График); меняет market.js
 const $ = (s, r = document) => r.querySelector(s);
@@ -851,29 +851,20 @@ function fillPanel(im) {
 }
 /* ---------- Дата, ТФ, монета ---------- */
 const pad2 = (n) => String(n).padStart(2, '0');
-function isoToDateText(iso) {                // UTC из базы → «ДД.ММ.ГГГГ ЧЧ:ММ» в местном времени браузера
+function isoToLocalInput(iso) {              // UTC из базы → местное время браузера для datetime-local
   if (!iso) return '';
   const d = new Date(iso); if (isNaN(d)) return '';
-  return `${pad2(d.getDate())}.${pad2(d.getMonth() + 1)}.${d.getFullYear()} ${pad2(d.getHours())}:${pad2(d.getMinutes())}`;
+  return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}T${pad2(d.getHours())}:${pad2(d.getMinutes())}`;
 }
-// «ДД.ММ.ГГГГ[ ЧЧ:ММ]» (местное время; без времени = 00:00) → { ok, iso }. Пусто = ok с null. Несуществующая дата = не ok.
-function parseDateText(text) {
-  const t = String(text || '').trim();
-  if (!t) return { ok: true, iso: null };
-  const m = t.match(/^(\d{1,2})\.(\d{1,2})\.(\d{4})(?:\s+(\d{1,2}):(\d{2}))?$/);
-  if (!m) return { ok: false };
-  const [dd, mo, yy, hh, mi] = [+m[1], +m[2], +m[3], +(m[4] || 0), +(m[5] || 0)];
-  if (yy < 1970 || yy > 2100) return { ok: false };
-  const d = new Date(yy, mo - 1, dd, hh, mi);
-  if (d.getFullYear() !== yy || d.getMonth() !== mo - 1 || d.getDate() !== dd || d.getHours() !== hh || d.getMinutes() !== mi) return { ok: false };   // 31.02, 25:00, время, которого нет при переводе часов
-  return { ok: true, iso: d.toISOString() };
+function localInputToIso(v) {                // местное время из поля → UTC для базы
+  if (!v) return null;
+  const d = new Date(v); return isNaN(d) ? null : d.toISOString();
 }
 function renderMeta(im) {
   const on = DB.slotsOn();
   $('#m-meta').hidden = !on;
   if (!on) return;
-  $('#m-date').value = isoToDateText(im.range_to);
-  $('#m-date').classList.remove('invalid');
+  $('#m-date').value = isoToLocalInput(im.range_to);
   const v = $('#tf-select .sel-val'); v.textContent = '';
   if (im.timeframe) v.appendChild(chipEl(im.timeframe)); else v.appendChild(el('span', 'dash', '—'));
   renderCoin(im);
@@ -881,6 +872,7 @@ function renderMeta(im) {
 function renderCoin(im) {
   const sym = parseTitle(im.title).symbol;
   $('#m-coin').textContent = sym ? `Монета: ${sym}` : 'Монета: не найдена в названии';
+  renderBuild(im);
 }
 function renderTfMenu(m) {
   const im = curImage(); if (!im) return;
@@ -901,7 +893,8 @@ function setDate(iso) {
   const id = state.modalId, im = curImage();
   if (!im || (im.range_to || null) === iso) return;
   im.range_to = iso;
-  queueSave(id, 'range_to', iso, { delay: 700 });
+  queueSave(id, 'range_to', iso);
+  renderBuild(im);
 }
 // Название изменилось: пересчитать монету (symbol в базе) и, если ТФ пуст, подставить его из названия (выбранный вручную не трогаем)
 function syncFromTitle(id, im) {
@@ -910,6 +903,94 @@ function syncFromTitle(id, im) {
   if ((im.symbol || null) !== p.symbol) { im.symbol = p.symbol; queueSave(id, 'symbol', p.symbol, { delay: 600 }); }
   if (!im.timeframe && p.tf) { im.timeframe = p.tf; queueSave(id, 'timeframe', p.tf, { delay: 600 }); if (state.modalId === id) renderMeta(im); }
   else if (state.modalId === id) renderCoin(im);
+}
+
+/* ---------- «Построить график»: снимок из нашего графика в слот «Основная» ---------- */
+let shotBusyId = null;                         // id записи, для которой сейчас идёт построение (одно на всё приложение)
+const setShotMsg = (id, text, err) => {
+  const im = state.images.find((x) => x.id === id) || findEverywhere(id);
+  if (im) im._shotMsg = text ? { text, err: !!err } : null;
+  if (state.modalId === id) { const cur = curImage(); if (cur) renderBuild(cur); }
+};
+function findEverywhere(id) {                  // запись в списке активной вкладки или в кэше других вкладок
+  const a = state.images.find((x) => x.id === id);
+  if (a) return a;
+  for (const list of tabCache.values()) { const f = list.find((x) => x.id === id); if (f) return f; }
+  return null;
+}
+function buildMissing(im) {
+  const miss = [];
+  if (!parseTitle(im.title).symbol) miss.push('монета в названии');
+  if (!im.timeframe) miss.push('ТФ');
+  if (!im.range_to) miss.push('дата');
+  return miss;
+}
+function renderBuild(im) {
+  const btn = $('#m-build'), st = $('#m-build-status');
+  if (!btn || !im) return;
+  const on = DB.slotsOn() && !!window.MarketShot;
+  $('#m-build-wrap').hidden = !on;
+  if (!on) return;
+  const miss = buildMissing(im), busy = !!shotBusyId;
+  btn.disabled = busy || miss.length > 0;
+  btn.textContent = busy ? 'идёт построение' : 'Построить график';
+  let text = '', err = false;
+  if (miss.length) text = 'Нужны: ' + miss.join(', ');
+  else if (busy) text = shotBusyId === im.id ? ((im._shotMsg && im._shotMsg.text) || 'Построение…') : 'Идёт построение другой записи';
+  else if (im._shotMsg) { text = im._shotMsg.text; err = im._shotMsg.err; }
+  else text = slotFilled(im, 'chart') ? 'Основная есть: построение её заменит' : '';
+  st.textContent = text; st.title = text; st.classList.toggle('err', err);
+}
+async function buildChartFor(id) {
+  const im0 = findEverywhere(id);
+  if (!im0 || shotBusyId || !DB.slotsOn()) return;
+  if (!window.MarketShot) { logE('Построение: market.js не загружен'); toast('Построение недоступно'); return; }
+  const symbol = parseTitle(im0.title).symbol, tf = im0.timeframe, endMs = im0.range_to ? Date.parse(im0.range_to) : NaN;
+  if (!symbol || !tf || !Number.isFinite(endMs)) { renderBuild(im0); return; }
+  const name = im0.title || 'Без названия';
+  if (slotFilled(im0, 'chart')) {
+    const ch = await openDialog({ title: 'Заменить основную картинку?', body: el('p', '', `У записи «${name}» уже есть основная картинка. Новая заменит её, старые файлы будут удалены.`),
+      buttons: [{ id: 'cancel', label: 'Отмена', focus: true }, { id: 'replace', label: 'Заменить', kind: 'danger' }] });
+    if (ch !== 'replace') return;
+  }
+  if (shotBusyId) return;
+  shotBusyId = id; setShotMsg(id, 'Построение…');
+  logI(`Построение: запущено для «${name}» (${symbol} ${tf}, ${new Date(endMs).toISOString()})`);
+  try {
+    const shot = await MarketShot.build({ symbol, timeframe: tf, endMs, onStage: (t) => setShotMsg(id, t) });
+    setShotMsg(id, 'Сохранение…');
+    const file = new File([shot.blob], 'chart.png', { type: 'image/png' });
+    const { preview } = await makePreview(file);
+    logI(`Построение: файл ${(file.size / 1024).toFixed(0)} КБ, превью ${(preview.size / 1024).toFixed(0)} КБ`);
+    const params = { symbol, timeframe: tf, end_ms: endMs, end_utc: new Date(endMs).toISOString(), candles: shot.candles, first_ms: shot.firstTs, last_ms: shot.lastTs,
+      width: shot.width, height: shot.height, dpr: shot.dpr, bar_space: shot.barSpace, source: 'binance_usdm', klinecharts: shot.klinecharts || null, built_at: new Date().toISOString() };
+    const t0 = performance.now();
+    const res = await DB.replaceChart(id, file, preview, params);       // результат уходит в запись id, даже если открыта другая
+    logI(`Построение: сохранено в хранилище и базе за ${Math.round(performance.now() - t0)} мс (${res.patch.chart_path})`);
+    if (res.oldFail) logE('Построение: ' + res.oldFail);
+    await applyChartPatch(id, res);
+    setShotMsg(id, `Готово: ${shot.width}×${shot.height}, свечей ${shot.candles}`);
+  } catch (e) {
+    const text = e.code === 'GONE' ? 'Запись удалена, результат отброшен' : errMsg(e);
+    logE(`Построение: ${e.code === 'GONE' ? errMsg(e) : text} («${name}»)`);
+    setShotMsg(id, text, true);
+  } finally {
+    shotBusyId = null;
+    const cur = curImage(); if (cur && isModalOpen()) renderBuild(cur);
+  }
+}
+// Новая «Основная» применяется ко всем копиям записи (список вкладки и кэш вкладок), карточке, месту и открытой модалке
+async function applyChartPatch(id, res) {
+  const { patch, oldSize } = res;
+  const copies = [...state.images.filter((x) => x.id === id)];
+  tabCache.forEach((list) => list.forEach((x) => { if (x.id === id) copies.push(x); }));
+  copies.forEach((x) => Object.assign(x, patch));
+  try { await ensureUrls([patch.chart_preview_path]); } catch (e) { logW('Построение: ссылка на превью не получена: ' + errMsg(e)); }
+  if (oldSize) addUsage({ chart_size: oldSize }, -1);
+  addUsage({ chart_size: patch.chart_size }, 1);
+  const im = state.images.find((x) => x.id === id), old = $(`.card[data-id="${id}"]`);
+  if (im && old) old.replaceWith(imageCard(im));                          // вместо «Нет графика» появляется картинка
+  if (im && state.modalId === id) showSlot(im, 'chart');                  // «Основная» становится большой
 }
 
 /* ---------- колонка миниатюр слева: два слота, которые сейчас не большие (порядок Основная, Оригинал, Запасная) ---------- */
@@ -1211,18 +1292,9 @@ function bindPanel() {
   $('#folder-host').addEventListener('click', (e) => { if (!inMenu(e)) toggleMenu('folder', $('#folder-host'), renderFolderMenu, 'match right'); });
   $('#tf-host').addEventListener('click', (e) => { if (!inMenu(e)) toggleMenu('tf', $('#tf-host'), renderTfMenu, 'match'); });
   const dateEl = $('#m-date');
-  dateEl.addEventListener('input', () => {                    // верно: сохраняем (с задержкой); неверно: красный контур, не сохраняем
-    const r = parseDateText(dateEl.value);
-    dateEl.classList.toggle('invalid', !r.ok);
-    if (r.ok) setDate(r.iso);
-  });
-  dateEl.addEventListener('blur', () => {
-    const r = parseDateText(dateEl.value), im = curImage();
-    if (!r.ok) { logW(`Дата не сохранена: «${dateEl.value}» не похоже на ДД.ММ.ГГГГ ЧЧ:ММ или такой даты нет${im ? ` («${im.title || 'Без названия'}»)` : ''}`); return; }
-    if (im) dateEl.value = isoToDateText(im.range_to);          // привести к единому виду
-    dateEl.classList.remove('invalid');
-  });
-  $('#m-date-clear').addEventListener('click', () => { dateEl.value = ''; dateEl.classList.remove('invalid'); setDate(null); });
+  dateEl.addEventListener('change', () => setDate(localInputToIso(dateEl.value)));       // сегменты ДД, ММ, ГГГГ, ЧЧ, мин вводятся с клавиатуры
+  $('#m-date-clear').addEventListener('click', () => { dateEl.value = ''; setDate(null); });
+  $('#m-build').addEventListener('click', () => buildChartFor(state.modalId));
   const c = $('#m-comment');
   c.addEventListener('input', () => {
     const id = state.modalId, im = curImage(); if (!im) return;

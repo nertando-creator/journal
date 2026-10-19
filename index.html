@@ -97,7 +97,7 @@
           <div class="m-sel-cell">
             <div class="m-label">Дата</div>
             <div class="m-date-wrap">
-              <input id="m-date" class="m-date" type="text" inputmode="numeric" maxlength="16" placeholder="ДД.ММ.ГГГГ ЧЧ:ММ" spellcheck="false" autocomplete="off">
+              <input id="m-date" class="m-date" type="datetime-local" autocomplete="off">
               <button type="button" id="m-date-clear" class="m-date-clear" title="Очистить дату" aria-label="Очистить дату"><svg viewBox="0 0 10 10" width="8" height="8"><path d="M1 1l8 8M9 1l-8 8" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg></button>
             </div>
           </div>
@@ -109,6 +109,10 @@
           </div>
         </div>
         <div id="m-coin" class="m-coin"></div>
+        <div id="m-build-wrap" class="m-build" hidden>
+          <button type="button" id="m-build" class="m-build-btn" disabled>Построить график</button>
+          <div id="m-build-status" class="m-build-status"></div>
+        </div>
       </div>
       <div class="m-comment">
         <div class="m-label m-label-row"><span>Комментарий</span><span id="comment-state" class="save-state"></span></div>

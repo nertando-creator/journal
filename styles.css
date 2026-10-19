@@ -85,6 +85,8 @@
   --card-star: 14px;             /* звезда избранного на карточке */
   --card-star-pad: 8px;
   --fs-empty: 12px;
+  --build-h: 30px;               /* кнопка «Построить график» */
+  --build-gap: 8px;
   --meta-gap: 4px;               /* отступ строки «Монета» */
   --fs-date: 12px;
   --fs-slot: 10px;
@@ -310,9 +312,9 @@ body.dragging-tab, body.dragging-tab * { cursor: grabbing; user-select: none; }
 .m-meta { flex: none; }
 .m-meta-row { display: grid; grid-template-columns: minmax(0, 1fr) var(--status-w); column-gap: var(--select-gap); }
 .m-date-wrap { position: relative; }
-.m-date { width: 100%; height: var(--select-h); padding: 0 30px 0 10px; background: var(--bg-select); border: 0; border-radius: var(--r-field); color: var(--text); font: inherit; font-size: var(--fs-date); outline: none; }
-.m-date::placeholder { color: var(--text-muted); }
-.m-date.save-error, .m-date.invalid { box-shadow: 0 0 0 1px var(--error-line); }
+.m-date { width: 100%; height: var(--select-h); padding: 0 30px 0 10px; color-scheme: dark; background: var(--bg-select); border: 0; border-radius: var(--r-field); color: var(--text); font: inherit; font-size: var(--fs-date); outline: none; }
+.m-date::-webkit-calendar-picker-indicator { display: none; }                 /* без значка и выпадающего календаря; сегменты вводятся с клавиатуры */
+.m-date.save-error { box-shadow: 0 0 0 1px var(--error-line); }
 .m-date-clear { position: absolute; right: 8px; top: 50%; transform: translateY(-50%); width: 16px; height: 16px; display: grid; place-items: center; color: var(--tri); }
 .m-date-clear:hover { color: var(--tri-hover); }
 .m-coin { margin-top: var(--meta-gap); font-size: var(--fs-label); line-height: var(--label-h); color: var(--text-muted); }
@@ -351,3 +353,11 @@ body.dragging-tab, body.dragging-tab * { cursor: grabbing; user-select: none; }
 .zoom-box img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; display: block; }
 #z-img { opacity: 0; transition: opacity .12s; }
 #z-img.ready { opacity: 1; }
+
+/* кнопка «Построить график» */
+.m-build { margin-top: var(--build-gap); }
+.m-build-btn { width: 100%; height: var(--build-h); border-radius: var(--r-field); background: var(--btn); color: var(--text); font-size: var(--fs-date); }
+.m-build-btn:hover:not(:disabled) { background: var(--btn-hover); }
+.m-build-btn:disabled { opacity: .45; cursor: default; }
+.m-build-status { margin-top: var(--meta-gap); font-size: var(--fs-label); line-height: var(--label-h); color: var(--text-muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.m-build-status.err { color: var(--error-text); }

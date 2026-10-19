@@ -26,6 +26,11 @@
   const SYMBOLS_TTL_MS = 12 * 3600e3;
   const PREFS_KEY = 'journal_market_v1', SYMBOLS_KEY = 'journal_market_symbols_v1';
   const RSI_PERIOD = 14;
+  // --- снимок для слота «Основная» (кнопка «Построить график» в модалке) ---
+  const EXPORT_W = 1600, EXPORT_H = 1032;   // итоговый файл ровно такого размера (пропорция 944:609, как рамка модалки)
+  const EXPORT_FILL = 0.8;                  // свечи занимают эту долю ширины области свечей, справа остаётся остальное
+  const EXPORT_BAR_MAX = 12;                // верхний предел ширины свечи, px (на случай малого числа свечей)
+  const EXPORT_FONT = 16;                   // размер подписей осей на снимке, px (картинка уменьшается в модалке)
   const HRAY = 'mktHRay';                // имя своего горизонтального луча
 
   /* ================= МЕЛОЧИ ================= */
@@ -230,7 +235,7 @@
         s.textContent = src + '\n//# sourceURL=klinecharts-patched.js';
         document.head.appendChild(s);
         if (!libReady()) return false;
-        logI(L(`предел сжатия изменён ${how}: ${BAR_SPACE_MIN} px вместо 1`)); return true;
+        this.patched = how; logI(L(`предел сжатия изменён ${how}: ${BAR_SPACE_MIN} px вместо 1`)); return true;
       } catch (e) { logW(L(`загрузка с правкой не удалась (${msgOf(e)}), пробую обычным скриптом`)); return false; }
     },
     _loadTag(u) {
@@ -763,6 +768,133 @@
       else if (e.key === 'Escape' && Chart.drawingId) { e.preventDefault(); Chart.cancelDrawing(); }
     });
   }
+
+
+  /* ================= СНИМОК ГРАФИКА ДЛЯ ЗАПИСИ (MarketShot.build) =================
+     Отдельный скрытый экземпляр KLineChart за пределами экрана: живой график, его поток и данные не трогаются.
+     Данные: один REST-запрос (та же очередь с паузами и защитой от 429/418, что и история во вкладке «График»). */
+  const MarketShot = (() => {
+    let busy = false;
+    const S = (t) => 'Построение: ' + t;
+    const kyiv = (ms) => new Date(ms).toLocaleString('ru-RU', { timeZone: 'Europe/Kyiv', hour12: false });
+    const utc = (ms) => new Date(ms).toISOString().replace('T', ' ').slice(0, 19) + ' UTC';
+    const both = (ms) => `${utc(ms)} (Киев ${kyiv(ms)})`;
+    const frames = (n) => new Promise((r) => { const f = (i) => (i <= 0 ? r() : requestAnimationFrame(() => f(i - 1))); f(n); });
+    const loadImage = (url) => new Promise((res, rej) => { const i = new Image(); i.onload = () => res(i); i.onerror = () => rej(new Error('снимок графика не открылся как картинка')); i.src = url; });
+    function mapErr(e) {                           // понятный текст для строки статуса
+      if (e.code === 'BLOCKED') return mkErr('LIMIT', `Лимит Binance: подожди ${Math.ceil((e.wait || 60000) / 1000)} с и повтори`, { orig: e });
+      if (e.code === 'NET') return mkErr('NET', 'Нет связи с Binance', { orig: e });
+      if (e.code === 'HTTP' && (e.bcode === -1121 || /invalid symbol/i.test(e.message))) return mkErr('SYMBOL', 'Нету на Binance', { orig: e });
+      if (e.code === 'HTTP' && e.status === 400) return mkErr('HTTP', 'Binance не принял запрос: ' + msgOf(e), { orig: e });
+      return e;
+    }
+    // Библиотека рисует с devicePixelRatio, поэтому размер её картинки зависит от масштаба экрана; приводим к EXPORT_W × EXPORT_H
+    async function build({ symbol, timeframe, endMs, onStage }) {
+      if (busy) throw mkErr('BUSY', 'Построение уже идёт');
+      busy = true;
+      const t00 = performance.now(), stage = (t) => { if (onStage) onStage(t); };
+      const lap = (t0) => Math.round(performance.now() - t0) + ' мс';
+      let container = null;
+      try {
+        logI(S(`старт: ${symbol} ${timeframe}, конец ${both(endMs)}, devicePixelRatio ${window.devicePixelRatio}`));
+        // 1. Данные: endTime = дата в мс; Binance в документации не описывает, по какому времени фильтрует endTime, поэтому лишнее отбрасываем сами
+        stage('Загрузка свечей…');
+        let t0 = performance.now(), rows;
+        try { rows = await historyGet({ symbol, interval: timeframe, endTime: endMs, limit: PAGE_LIMIT }, `построение ${symbol} ${timeframe}`, () => false); }
+        catch (e) { logE(S(`свечи не получены: ${msgOf(e)}`)); throw mapErr(e); }
+        const got = rows.length;
+        rows = rows.filter((r) => r[0] <= endMs);
+        logI(S(`свечи: пришло ${got}${got < PAGE_LIMIT ? ` (меньше ${PAGE_LIMIT}, берём сколько есть)` : ''}, отброшено позже даты ${got - rows.length}, ${lap(t0)}`));
+        if (!rows.length) { logW(S(`нет данных за эту дату (${symbol} ${timeframe}, конец ${both(endMs)})`)); throw mkErr('EMPTY', 'Нет данных за эту дату'); }
+        const bars = rows.map(parseBar), n = bars.length, first = bars[0].timestamp, last = bars[n - 1].timestamp;
+        logI(S(`первая свеча ${both(first)}, последняя ${both(last)}`));
+        if (endMs - last > 2 * TF_MS[timeframe]) logW(S(`последняя свеча ${Math.round((endMs - last) / TF_MS[timeframe])} периодов раньше даты: у монеты нет торгов около этой даты`));
+        // 2. Библиотека
+        stage('Подготовка графика…');
+        t0 = performance.now();
+        await Chart.loadLib();
+        const k = window.klinecharts;
+        let ver = ''; try { ver = typeof k.version === 'function' ? k.version() : ''; } catch { /* ок */ }
+        logI(S(`библиотека готова${ver ? ' v' + ver : ''}${Chart.patched ? ', предел сжатия ' + Chart.patched : ''}, ${lap(t0)}`));
+        // 3. Скрытый график за пределами экрана (не display:none и не visibility: иначе размер нулевой)
+        t0 = performance.now();
+        container = document.createElement('div');
+        container.setAttribute('aria-hidden', 'true');
+        container.style.cssText = `position:absolute;left:-99999px;top:0;width:${EXPORT_W}px;height:${EXPORT_H}px;pointer-events:none;`;
+        document.body.appendChild(container);
+        const st = Chart.styles();                                    // цвета из CSS, как у живого графика
+        st.candle.tooltip.showRule = 'none';                          // без подсказки свечи
+        st.candle.priceMark.show = false;                             // без отметок high/low/последней цены
+        st.crosshair.show = false;                                    // без перекрестия
+        st.xAxis.tickText.size = EXPORT_FONT; st.yAxis.tickText.size = EXPORT_FONT;
+        const chart = k.init(container, { styles: st });
+        if (!chart) throw mkErr('LIB', 'klinecharts.init вернул пустоту');
+        safe('часовой пояс снимка', () => chart.setTimezone(Intl.DateTimeFormat().resolvedOptions().timeZone));
+        const pp = guessPrecision(rows);
+        safe('точность цены снимка', () => chart.setPriceVolumePrecision(pp, 0));
+        const box = container.getBoundingClientRect();
+        const mainW = safe('размер области свечей', () => chart.getSize('candle_pane', 'main').width, 0) || (EXPORT_W - 90);
+        const mainH = safe('размер области свечей', () => chart.getSize('candle_pane', 'main').height, 0);
+        logI(S(`контейнер ${Math.round(box.width)}×${Math.round(box.height)}, область свечей ${Math.round(mainW)}×${Math.round(mainH)}`));
+        // 4. Раскладка: n свечей на EXPORT_FILL ширины области свечей, справа пустое место
+        const wantSpace = Math.min(EXPORT_BAR_MAX, (EXPORT_FILL * mainW) / n);
+        const offset = (1 - EXPORT_FILL) * mainW;
+        const applyLayout = () => {
+          safe('отступ справа', () => { if (typeof chart.setMaxOffsetRightDistance === 'function') chart.setMaxOffsetRightDistance(mainW); chart.setOffsetRightDistance(offset); });
+          safe('ширина свечи', () => chart.setBarSpace(wantSpace));
+        };
+        applyLayout();
+        const ready = new Promise((res) => { let d = false; const fin = () => { if (!d) { d = true; res(); } }; safe('onDataReady', () => chart.subscribeAction('onDataReady', fin)); setTimeout(fin, 3000); });
+        chart.applyNewData(bars, false);                              // false: истории слева нет, подгрузка не запрашивается
+        await ready;
+        applyLayout();
+        safe('к последней свече', () => chart.scrollToRealTime());
+        let bs = safe('getBarSpace', () => chart.getBarSpace(), NaN);
+        if (Number.isFinite(bs) && Math.abs(bs - wantSpace) > 0.01) {
+          logW(S(`ширина свечи ${bs.toFixed(3)} px вместо ${wantSpace.toFixed(3)} (библиотека отклонила значение: предел сжатия не расширен?)`));
+          if (wantSpace < 1) { safe('ширина свечи 1', () => chart.setBarSpace(1)); bs = safe('getBarSpace', () => chart.getBarSpace(), bs); }
+        }
+        logI(S(`свечей ${n}, ширина свечи ${Number.isFinite(bs) ? bs.toFixed(3) : '?'} px (нужно ${wantSpace.toFixed(3)}), отступ справа ${Math.round(offset)} px, точность цены ${pp}`));
+        // 5. Дождаться отрисовки: данные применены, шрифты, не меньше двух кадров
+        stage('Отрисовка…');
+        if (document.hidden) logW(S('вкладка браузера скрыта: отрисовка может быть неполной'));
+        try { await document.fonts.ready; } catch { /* ок */ }
+        await frames(2); await sleep(200); await frames(1);
+        const vr = safe('getVisibleRange', () => chart.getVisibleRange(), null);
+        const x1 = safe('позиция первой свечи', () => chart.convertToPixel({ timestamp: first }, { paneId: 'candle_pane' }).x, NaN);
+        const x2 = safe('позиция последней свечи', () => chart.convertToPixel({ timestamp: last }, { paneId: 'candle_pane' }).x, NaN);
+        const fill = Number.isFinite(x1) && Number.isFinite(x2) ? (x2 - x1) / mainW : NaN;
+        logI(S(`отрисовка: ${lap(t0)}; видимый диапазон ${vr ? JSON.stringify(vr) : '?'}; x первой ${Number.isFinite(x1) ? Math.round(x1) : '?'}, x последней ${Number.isFinite(x2) ? Math.round(x2) : '?'}, доля ширины ${Number.isFinite(fill) ? (fill * 100).toFixed(1) + '%' : '?'}`));
+        // 6. Снимок и приведение к EXPORT_W × EXPORT_H
+        stage('Снимок…');
+        t0 = performance.now();
+        const bg = cssVar('--mod-market-bg') || '#141414';
+        const url = chart.getConvertPictureUrl(false, 'png', bg);
+        if (!url || typeof url !== 'string') throw mkErr('SHOT', 'библиотека не вернула картинку');
+        const img = await loadImage(url);
+        const rawW = img.naturalWidth, rawH = img.naturalHeight;
+        const cv = document.createElement('canvas'); cv.width = EXPORT_W; cv.height = EXPORT_H;
+        const ctx = cv.getContext('2d');
+        ctx.fillStyle = bg; ctx.fillRect(0, 0, EXPORT_W, EXPORT_H);
+        ctx.imageSmoothingQuality = 'high';
+        ctx.drawImage(img, 0, 0, EXPORT_W, EXPORT_H);
+        const blob = await new Promise((r) => cv.toBlob(r, 'image/png'));
+        if (!blob) throw mkErr('SHOT', 'не удалось сохранить снимок в PNG');
+        logI(S(`снимок: библиотека отдала ${rawW}×${rawH}${rawW === EXPORT_W && rawH === EXPORT_H ? '' : ' (приведено к размеру)'}, файл ${EXPORT_W}×${EXPORT_H}, PNG ${(blob.size / 1024).toFixed(0)} КБ, ${lap(t0)}`));
+        if (blob.size > 1048576) logW(S(`PNG больше 1 МБ (${(blob.size / 1048576).toFixed(2)} МБ): можно перейти на WebP высокого качества, по умолчанию оставлен PNG`));
+        logI(S(`готово за ${lap(t00)}`));
+        return { blob, width: EXPORT_W, height: EXPORT_H, candles: n, firstTs: first, lastTs: last, dpr: window.devicePixelRatio, barSpace: bs, rawW, rawH, klinecharts: ver, fill };
+      } catch (e) {
+        if (!e.code) logE(S(`сбой: ${msgOf(e)}`));
+        throw e;
+      } finally {
+        if (container) { safe('dispose снимка', () => window.klinecharts.dispose(container)); container.remove(); }
+        busy = false;
+      }
+    }
+    return { build, isBusy: () => busy };
+  })();
+  window.MarketShot = MarketShot;
 
   buildView();
   bind();
