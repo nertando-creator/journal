@@ -1,18 +1,18 @@
 /* market.css — окно «График» и переключатель окон. Цвета и размеры только через переменные ниже. */
 :root {
   /* --- Цвета графика --- */
-  --mod-market-bg: #141a26;              /* фон графика (и живого, и картинки): светлее прежнего, с уклоном в тёмно-синий */
-  --mod-market-grid: #1e2636;            /* тонкая малоконтрастная сетка */
+  --mod-market-bg: #0B0B0B;              /* фон графика (и живого, и картинки) */
+  --mod-market-grid: #171717;            /* тонкая малоконтрастная сетка */
   --mod-market-grid-w: 1;                /* толщина линий сетки, px (число) */
-  --mod-market-frame: #2c364b;           /* рамка вокруг картинки графика (только на снимке для записи) */
+  --mod-market-frame: #2a2a2a;           /* рамка вокруг картинки графика (только на снимке для записи) */
   --mod-market-frame-w: 1;               /* толщина рамки, px файла (число) */
-  --mod-market-axis-line: #2a3347;
-  --mod-market-axis-text: #8b95a8;
-  --mod-market-up: #16c784;
-  --mod-market-down: #f6465d;
+  --mod-market-axis-line: #232323;
+  --mod-market-axis-text: #8a8a8a;
+  --mod-market-up: #0BB997;
+  --mod-market-down: #F12A1C;
   --mod-market-neutral: #8A8A8A;
-  --mod-market-crosshair: #5d6a82;
-  --mod-market-crosshair-bg: #2f394d;
+  --mod-market-crosshair: #5c5c5c;
+  --mod-market-crosshair-bg: #2a2a2a;
   --mod-market-rsi: #B48CF2;
   --mod-market-rsi-level: #5C5C5C;
   --mod-market-line: #5B9BF0;            /* трендовая линия */

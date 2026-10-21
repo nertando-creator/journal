@@ -1,5 +1,5 @@
 /* app.js — интерфейс. С Supabase общается только через DB (storage.js). */
-const APP_VERSION = 'v5.1';
+const APP_VERSION = 'v5.2';
 const CFG = window.APP_CONFIG;
 let viewMode = 'gallery';                // какое окно открыто: 'gallery' (Формации) или 'market' (График); меняет market.js
 const $ = (s, r = document) => r.querySelector(s);
@@ -403,7 +403,7 @@ function mimeOf(f) {
   return null;
 }
 // Монета и таймфрейм из названия: «FILUSDT 1m» → { symbol: 'FILUSDT', tf: '1m' }. Монета: первое слово на USDT (регистр не важен).
-const TF_LIST = ['1m', '5m', '15m', '1h', '4h', '1d'];
+const TF_LIST = ['1m', '5m', '15m', '30m', '1h', '4h', '1d'];
 function parseTitle(title) {
   const words = String(title || '').split(/[\s,;:|/\\()[\]]+/).filter(Boolean);
   const coin = words.find((w) => /^.+usdt$/i.test(w));

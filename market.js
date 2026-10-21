@@ -11,8 +11,8 @@
   const KLINE_PATHS = ['/dist/umd/klinecharts.min.js', '/dist/klinecharts.min.js'];   // у v9 путь файла проверяется по очереди
   const REST_BASE = 'https://fapi.binance.com';
   const WS_BASE = 'wss://fstream.binance.com/market/ws/';          // с 2026 свечи только на /market (старый /ws отключается)
-  const TFS = ['1m', '5m', '15m', '1h', '4h', '1d'];
-  const TF_MS = { '1m': 6e4, '5m': 3e5, '15m': 9e5, '1h': 36e5, '4h': 144e5, '1d': 864e5 };
+  const TFS = ['1m', '5m', '15m', '30m', '1h', '4h', '1d'];
+  const TF_MS = { '1m': 6e4, '5m': 3e5, '15m': 9e5, '30m': 18e5, '1h': 36e5, '4h': 144e5, '1d': 864e5 };
   const DEFAULT_SEL = { symbol: 'BTCUSDT', tf: '1m' };
   const PAGE_LIMIT = 1500;               // максимум свечей за запрос (вес 10)
   const HIST_MIN_GAP_MS = 800;           // пауза между запросами истории (защита при быстрой прокрутке)
@@ -30,7 +30,7 @@
   const EXPORT_W = 1600, EXPORT_H = 1032;   // итоговый файл ровно такого размера (пропорция 944:609, как рамка модалки)
   const CANDLES_DEFAULT = 500;              // сколько свечей брать, если поле «От» пусто (заканчиваются на «До»)
   const EXPORT_RIGHT_PAD = 0.1;             // пустое место справа от последней свечи, доля ширины области свечей
-  const EXPORT_V_PAD = 0.08;                // поля сверху и снизу области свечей, доля её высоты
+  const EXPORT_PAD_Y = 0.18;                // поля сверху и снизу области свечей, доля её высоты (свечи не занимают всю высоту)
   const EXPORT_BAR_MAX = 12;                // верхний предел ширины свечи, px (на случай малого числа свечей)
   const EXPORT_FONT = 16;                   // размер подписей осей на снимке, px (картинка уменьшается в модалке)
   const HRAY = 'mktHRay';                // имя своего горизонтального луча
@@ -840,14 +840,14 @@
         st.candle.tooltip.showRule = 'none';                          // без подсказки свечи
         st.candle.priceMark.show = false;                             // без отметок high/low/последней цены
         st.crosshair.show = false;                                    // без перекрестия
-        st.xAxis.tickText.size = EXPORT_FONT; st.yAxis.tickText.size = EXPORT_FONT;
+        st.xAxis.show = false; st.yAxis.show = false;                 // на картинке без шкалы времени и шкалы цены (на живом графике они остаются)
         const chart = k.init(container, { styles: st });
         if (!chart) throw mkErr('LIB', 'klinecharts.init вернул пустоту');
         safe('часовой пояс снимка', () => chart.setTimezone(Intl.DateTimeFormat().resolvedOptions().timeZone));
         const pp = guessPrecision(rows);
         safe('точность цены снимка', () => chart.setPriceVolumePrecision(pp, 0));
         // Поля сверху и снизу: у v9 есть gap панели (доля от высоты, значение меньше 1 = процент); по умолчанию у свечной панели top 0.2, bottom 0.1
-        safe('поля по вертикали', () => chart.setPaneOptions({ id: 'candle_pane', gap: { top: EXPORT_V_PAD, bottom: EXPORT_V_PAD } }));
+        safe('поля по вертикали', () => chart.setPaneOptions({ id: 'candle_pane', gap: { top: EXPORT_PAD_Y, bottom: EXPORT_PAD_Y } }));
         const box = container.getBoundingClientRect();
         const mainW = safe('размер области свечей', () => chart.getSize('candle_pane', 'main').width, 0) || (EXPORT_W - 90);
         const mainH = safe('размер области свечей', () => chart.getSize('candle_pane', 'main').height, 0);
@@ -881,12 +881,29 @@
         const x2 = safe('позиция последней свечи', () => chart.convertToPixel({ timestamp: last }, { paneId: 'candle_pane' }).x, NaN);
         const fill = Number.isFinite(x1) && Number.isFinite(x2) ? (x2 - x1) / mainW : NaN;
         logI(S(`отрисовка: ${lap(t0)}; видимый диапазон ${vr ? JSON.stringify(vr) : '?'}; x первой ${Number.isFinite(x1) ? Math.round(x1) : '?'}, x последней ${Number.isFinite(x2) ? Math.round(x2) : '?'}, доля ширины ${Number.isFinite(fill) ? (fill * 100).toFixed(1) + '%' : '?'}`));
+        // Оси скрыты: область свечей должна занять весь контейнер. Проверяем по факту (если библиотека оставила место под оси, ниже обрежем).
+        const mainW2 = safe('размер области свечей', () => chart.getSize('candle_pane', 'main').width, mainW), mainH2 = safe('размер области свечей', () => chart.getSize('candle_pane', 'main').height, mainH);
+        const axesGone = mainW2 >= EXPORT_W - 2 && (!mainH2 || mainH2 >= EXPORT_H - 2);
+        logI(S(`область свечей после отрисовки ${Math.round(mainW2)}×${Math.round(mainH2)} из ${EXPORT_W}×${EXPORT_H}${axesGone ? ' (оси убраны)' : ' (под оси осталось место: снимок будет обрезан)'}`));
+        // Поля сверху и снизу: измеряем, где нарисованы максимум и минимум; если gap панели сработал иначе, подгоняем (до двух поправок)
         const hi = Math.max(...bars.map((b) => b.high)), lo = Math.min(...bars.map((b) => b.low));
-        const yHi = safe('y максимума', () => chart.convertToPixel({ value: hi }, { paneId: 'candle_pane' }).y, NaN), yLo = safe('y минимума', () => chart.convertToPixel({ value: lo }, { paneId: 'candle_pane' }).y, NaN);
-        if (Number.isFinite(yHi) && Number.isFinite(yLo) && mainH) {
-          const top = yHi / mainH, bottom = (mainH - yLo) / mainH;
-          logI(S(`поля по вертикали: сверху ${(top * 100).toFixed(1)}%, снизу ${(bottom * 100).toFixed(1)}% (нужно ${(EXPORT_V_PAD * 100).toFixed(0)}%)`));
-          if (Math.abs(top - EXPORT_V_PAD) > 0.04 || Math.abs(bottom - EXPORT_V_PAD) > 0.04) logW(S('поля по вертикали отличаются от заданных: gap панели не применился?'));
+        const measure = () => {
+          const yHi = safe('y максимума', () => chart.convertToPixel({ value: hi }, { paneId: 'candle_pane' }).y, NaN), yLo = safe('y минимума', () => chart.convertToPixel({ value: lo }, { paneId: 'candle_pane' }).y, NaN);
+          const H = mainH2 || mainH;
+          return Number.isFinite(yHi) && Number.isFinite(yLo) && H ? { top: yHi / H, bottom: (H - yLo) / H } : null;
+        };
+        let m = measure(), gap = { top: EXPORT_PAD_Y, bottom: EXPORT_PAD_Y };
+        for (let it = 0; it < 2 && m && (Math.abs(m.top - EXPORT_PAD_Y) > 0.025 || Math.abs(m.bottom - EXPORT_PAD_Y) > 0.025); it++) {
+          logW(S(`поля по вертикали: сверху ${(m.top * 100).toFixed(1)}%, снизу ${(m.bottom * 100).toFixed(1)}% вместо ${(EXPORT_PAD_Y * 100).toFixed(0)}%, подгоняю gap`));
+          const fix = (g, got) => Math.min(0.45, Math.max(0, g * EXPORT_PAD_Y / Math.max(got, 0.005)));
+          gap = { top: fix(gap.top, m.top), bottom: fix(gap.bottom, m.bottom) };
+          safe('поля по вертикали', () => chart.setPaneOptions({ id: 'candle_pane', gap }));
+          await frames(2); await sleep(150); await frames(1);
+          m = measure();
+        }
+        if (m) {
+          logI(S(`поля по вертикали: сверху ${(m.top * 100).toFixed(1)}%, снизу ${(m.bottom * 100).toFixed(1)}% (нужно ${(EXPORT_PAD_Y * 100).toFixed(0)}%), gap ${gap.top.toFixed(3)}/${gap.bottom.toFixed(3)}`));
+          if (Math.abs(m.top - EXPORT_PAD_Y) > 0.04 || Math.abs(m.bottom - EXPORT_PAD_Y) > 0.04) logW(S('поля по вертикали не совпали с заданными: gap панели не применился?'));
         } else logW(S('поля по вертикали не измерены'));
         // 6. Снимок и приведение к EXPORT_W × EXPORT_H
         stage('Снимок…');
@@ -900,7 +917,8 @@
         const ctx = cv.getContext('2d');
         ctx.fillStyle = bg; ctx.fillRect(0, 0, EXPORT_W, EXPORT_H);
         ctx.imageSmoothingQuality = 'high';
-        ctx.drawImage(img, 0, 0, EXPORT_W, EXPORT_H);
+        if (axesGone) ctx.drawImage(img, 0, 0, EXPORT_W, EXPORT_H);
+        else ctx.drawImage(img, 0, 0, rawW * (mainW2 / EXPORT_W), rawH * ((mainH2 || EXPORT_H) / EXPORT_H), 0, 0, EXPORT_W, EXPORT_H);   // запасной путь: обрезать место под оси
         const fw = cssNum('--mod-market-frame-w', 1);                  // тонкая рамка вокруг картинки (только на снимке)
         ctx.strokeStyle = cssVar('--mod-market-frame') || '#2a3347'; ctx.lineWidth = fw;
         ctx.strokeRect(fw / 2, fw / 2, EXPORT_W - fw, EXPORT_H - fw);
