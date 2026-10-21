@@ -87,8 +87,12 @@
   --fs-empty: 12px;
   --build-h: 30px;               /* кнопка «Построить график» */
   --build-gap: 8px;
+  --meta-row-gap: 10px;          /* между рядом «От/До» и рядом «ТФ/Монета» */
+  --card-border: rgba(232, 232, 232, .26);   /* постоянная рамка карточки с картинкой */
+  --card-border-w: 1px;
+  --r-card-img: 8px;             /* скругление карточки с картинкой */
   --meta-gap: 4px;               /* отступ строки «Монета» */
-  --fs-date: 12px;
+  --fs-date: 11px;
   --fs-slot: 10px;
   --menu-max-h: 240px;
   --menu-gap: 4px;
@@ -310,14 +314,16 @@ body.dragging-tab, body.dragging-tab * { cursor: grabbing; user-select: none; }
 
 /* ===== v4.5/v4.6: Дата, ТФ, монета, слоты картинок, развёрнутый вид ===== */
 .m-meta { flex: none; }
-.m-meta-row { display: grid; grid-template-columns: minmax(0, 1fr) var(--status-w); column-gap: var(--select-gap); }
+.m-meta-row { display: grid; column-gap: var(--select-gap); }
+.m-meta-dates { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
+.m-meta-tf { grid-template-columns: var(--status-w) minmax(0, 1fr); margin-top: var(--meta-row-gap); align-items: end; }
 .m-date-wrap { position: relative; }
-.m-date { width: 100%; height: var(--select-h); padding: 0 30px 0 10px; color-scheme: dark; background: var(--bg-select); border: 0; border-radius: var(--r-field); color: var(--text); font: inherit; font-size: var(--fs-date); outline: none; }
+.m-date { width: 100%; min-width: 0; height: var(--select-h); padding: 0 24px 0 8px; color-scheme: dark; background: var(--bg-select); border: 0; border-radius: var(--r-field); color: var(--text); font: inherit; font-size: var(--fs-date); outline: none; }
 .m-date::-webkit-calendar-picker-indicator { display: none; }                 /* без значка и выпадающего календаря; сегменты вводятся с клавиатуры */
-.m-date.save-error { box-shadow: 0 0 0 1px var(--error-line); }
-.m-date-clear { position: absolute; right: 8px; top: 50%; transform: translateY(-50%); width: 16px; height: 16px; display: grid; place-items: center; color: var(--tri); }
+.m-date.save-error, .m-date.invalid { box-shadow: 0 0 0 1px var(--error-line); }
+.m-date-clear { position: absolute; right: 5px; top: 50%; transform: translateY(-50%); width: 16px; height: 16px; display: grid; place-items: center; color: var(--tri); }
 .m-date-clear:hover { color: var(--tri-hover); }
-.m-coin { margin-top: var(--meta-gap); font-size: var(--fs-label); line-height: var(--label-h); color: var(--text-muted); }
+.m-coin { height: var(--select-h); display: flex; align-items: center; min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; font-size: var(--fs-label); color: var(--text-muted); }
 #tf-select.save-error { box-shadow: 0 0 0 1px var(--error-line); }
 
 /* левая часть модалки: большая картинка + колонка миниатюр справа, прижатых к верху */
@@ -361,3 +367,8 @@ body.dragging-tab, body.dragging-tab * { cursor: grabbing; user-select: none; }
 .m-build-btn:disabled { opacity: .45; cursor: default; }
 .m-build-status { margin-top: var(--meta-gap); font-size: var(--fs-label); line-height: var(--label-h); color: var(--text-muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .m-build-status.err { color: var(--error-text); }
+
+/* карточки с основной картинкой: постоянная тонкая светлая рамка и чуть больше скругление; при наведении рамка как раньше */
+.thumb.has-chart { border-radius: var(--r-card-img); }
+.thumb.has-chart::after { border-width: var(--card-border-w); border-color: var(--card-border); }
+.card:hover .thumb.has-chart::after { border-color: var(--card-hover); }

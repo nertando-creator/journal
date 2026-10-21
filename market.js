@@ -28,7 +28,9 @@
   const RSI_PERIOD = 14;
   // --- снимок для слота «Основная» (кнопка «Построить график» в модалке) ---
   const EXPORT_W = 1600, EXPORT_H = 1032;   // итоговый файл ровно такого размера (пропорция 944:609, как рамка модалки)
-  const EXPORT_FILL = 0.8;                  // свечи занимают эту долю ширины области свечей, справа остаётся остальное
+  const CANDLES_DEFAULT = 500;              // сколько свечей брать, если поле «От» пусто (заканчиваются на «До»)
+  const EXPORT_RIGHT_PAD = 0.1;             // пустое место справа от последней свечи, доля ширины области свечей
+  const EXPORT_V_PAD = 0.08;                // поля сверху и снизу области свечей, доля её высоты
   const EXPORT_BAR_MAX = 12;                // верхний предел ширины свечи, px (на случай малого числа свечей)
   const EXPORT_FONT = 16;                   // размер подписей осей на снимке, px (картинка уменьшается в модалке)
   const HRAY = 'mktHRay';                // имя своего горизонтального луча
@@ -252,7 +254,7 @@
       const axis = () => ({ axisLine: { color: line }, tickLine: { color: line }, tickText: { color: txt } });
       const cross = () => ({ line: { color: c('--mod-market-crosshair') }, text: { backgroundColor: c('--mod-market-crosshair-bg'), borderColor: c('--mod-market-crosshair-bg') } });
       return {
-        grid: { horizontal: { color: c('--mod-market-grid') }, vertical: { color: c('--mod-market-grid') } },
+        grid: { horizontal: { color: c('--mod-market-grid'), size: cssNum('--mod-market-grid-w', 1), style: 'solid' }, vertical: { color: c('--mod-market-grid'), size: cssNum('--mod-market-grid-w', 1), style: 'solid' } },
         candle: {
           bar: { upColor: c('--mod-market-up'), downColor: c('--mod-market-down'), noChangeColor: c('--mod-market-neutral'),
                  upBorderColor: c('--mod-market-up'), downBorderColor: c('--mod-market-down'), noChangeBorderColor: c('--mod-market-neutral'),
@@ -789,22 +791,34 @@
       return e;
     }
     // Библиотека рисует с devicePixelRatio, поэтому размер её картинки зависит от масштаба экрана; приводим к EXPORT_W × EXPORT_H
-    async function build({ symbol, timeframe, endMs, onStage }) {
+    // fromMs: необязательно (null = последние CANDLES_DEFAULT свечей до endMs); с fromMs берутся свечи от «От» до «До» включительно
+    function count(fromMs, endMs, timeframe) {
+      const tf = TF_MS[timeframe]; if (!tf || fromMs == null) return null;
+      return Math.floor(endMs / tf) - Math.floor(fromMs / tf) + 1;
+    }
+    async function build({ symbol, timeframe, fromMs, endMs, onStage }) {
       if (busy) throw mkErr('BUSY', 'Построение уже идёт');
       busy = true;
       const t00 = performance.now(), stage = (t) => { if (onStage) onStage(t); };
       const lap = (t0) => Math.round(performance.now() - t0) + ' мс';
       let container = null;
       try {
-        logI(S(`старт: ${symbol} ${timeframe}, конец ${both(endMs)}, devicePixelRatio ${window.devicePixelRatio}`));
+        const tfms = TF_MS[timeframe], endA = Math.floor(endMs / tfms) * tfms, fromA = fromMs != null ? Math.floor(fromMs / tfms) * tfms : null;
+        const mode = fromA != null ? 'range' : 'last' + CANDLES_DEFAULT;
+        const expected = fromA != null ? (endA - fromA) / tfms + 1 : null;
+        logI(S(`старт: ${symbol} ${timeframe}, ${fromA != null ? `от ${both(fromMs)} ` : ''}до ${both(endMs)}, режим ${mode}${expected != null ? `, ожидается свечей ${expected}` : `, свечей ${CANDLES_DEFAULT}`}, devicePixelRatio ${window.devicePixelRatio}`));
+        if (fromA != null && fromA > endA) throw mkErr('RANGE', '«От» должно быть раньше «До»');
+        if (expected != null && expected > PAGE_LIMIT) throw mkErr('TOO_MANY', `Слишком много свечей: ${expected}, максимум ${PAGE_LIMIT}`);
         // 1. Данные: endTime = дата в мс; Binance в документации не описывает, по какому времени фильтрует endTime, поэтому лишнее отбрасываем сами
         stage('Загрузка свечей…');
         let t0 = performance.now(), rows;
-        try { rows = await historyGet({ symbol, interval: timeframe, endTime: endMs, limit: PAGE_LIMIT }, `построение ${symbol} ${timeframe}`, () => false); }
+        try { rows = await historyGet(fromA != null ? { symbol, interval: timeframe, startTime: fromA, endTime: endMs, limit: PAGE_LIMIT } : { symbol, interval: timeframe, endTime: endMs, limit: CANDLES_DEFAULT }, `построение ${symbol} ${timeframe}`, () => false); }
         catch (e) { logE(S(`свечи не получены: ${msgOf(e)}`)); throw mapErr(e); }
         const got = rows.length;
-        rows = rows.filter((r) => r[0] <= endMs);
-        logI(S(`свечи: пришло ${got}${got < PAGE_LIMIT ? ` (меньше ${PAGE_LIMIT}, берём сколько есть)` : ''}, отброшено позже даты ${got - rows.length}, ${lap(t0)}`));
+        rows = rows.filter((r) => r[0] <= endMs && (fromA == null || r[0] >= fromA));      // лишнего не оставляем
+        const want = expected != null ? expected : CANDLES_DEFAULT;
+        logI(S(`свечи: пришло ${got}, оставлено ${rows.length} из ${want} нужных${rows.length < want ? ' (меньше, берём сколько есть)' : ''}, отброшено вне периода ${got - rows.length}, ${lap(t0)}`));
+        if (rows.length < want) logW(S(`пришло ${rows.length} свечей вместо ${want}: ${fromA != null ? 'в периоде не было торгов или монета листингована позже' : 'у монеты меньше истории до этой даты'}`));
         if (!rows.length) { logW(S(`нет данных за эту дату (${symbol} ${timeframe}, конец ${both(endMs)})`)); throw mkErr('EMPTY', 'Нет данных за эту дату'); }
         const bars = rows.map(parseBar), n = bars.length, first = bars[0].timestamp, last = bars[n - 1].timestamp;
         logI(S(`первая свеча ${both(first)}, последняя ${both(last)}`));
@@ -832,13 +846,15 @@
         safe('часовой пояс снимка', () => chart.setTimezone(Intl.DateTimeFormat().resolvedOptions().timeZone));
         const pp = guessPrecision(rows);
         safe('точность цены снимка', () => chart.setPriceVolumePrecision(pp, 0));
+        // Поля сверху и снизу: у v9 есть gap панели (доля от высоты, значение меньше 1 = процент); по умолчанию у свечной панели top 0.2, bottom 0.1
+        safe('поля по вертикали', () => chart.setPaneOptions({ id: 'candle_pane', gap: { top: EXPORT_V_PAD, bottom: EXPORT_V_PAD } }));
         const box = container.getBoundingClientRect();
         const mainW = safe('размер области свечей', () => chart.getSize('candle_pane', 'main').width, 0) || (EXPORT_W - 90);
         const mainH = safe('размер области свечей', () => chart.getSize('candle_pane', 'main').height, 0);
         logI(S(`контейнер ${Math.round(box.width)}×${Math.round(box.height)}, область свечей ${Math.round(mainW)}×${Math.round(mainH)}`));
         // 4. Раскладка: n свечей на EXPORT_FILL ширины области свечей, справа пустое место
-        const wantSpace = Math.min(EXPORT_BAR_MAX, (EXPORT_FILL * mainW) / n);
-        const offset = (1 - EXPORT_FILL) * mainW;
+        const wantSpace = Math.min(EXPORT_BAR_MAX, ((1 - EXPORT_RIGHT_PAD) * mainW) / n);
+        const offset = EXPORT_RIGHT_PAD * mainW;
         const applyLayout = () => {
           safe('отступ справа', () => { if (typeof chart.setMaxOffsetRightDistance === 'function') chart.setMaxOffsetRightDistance(mainW); chart.setOffsetRightDistance(offset); });
           safe('ширина свечи', () => chart.setBarSpace(wantSpace));
@@ -865,6 +881,13 @@
         const x2 = safe('позиция последней свечи', () => chart.convertToPixel({ timestamp: last }, { paneId: 'candle_pane' }).x, NaN);
         const fill = Number.isFinite(x1) && Number.isFinite(x2) ? (x2 - x1) / mainW : NaN;
         logI(S(`отрисовка: ${lap(t0)}; видимый диапазон ${vr ? JSON.stringify(vr) : '?'}; x первой ${Number.isFinite(x1) ? Math.round(x1) : '?'}, x последней ${Number.isFinite(x2) ? Math.round(x2) : '?'}, доля ширины ${Number.isFinite(fill) ? (fill * 100).toFixed(1) + '%' : '?'}`));
+        const hi = Math.max(...bars.map((b) => b.high)), lo = Math.min(...bars.map((b) => b.low));
+        const yHi = safe('y максимума', () => chart.convertToPixel({ value: hi }, { paneId: 'candle_pane' }).y, NaN), yLo = safe('y минимума', () => chart.convertToPixel({ value: lo }, { paneId: 'candle_pane' }).y, NaN);
+        if (Number.isFinite(yHi) && Number.isFinite(yLo) && mainH) {
+          const top = yHi / mainH, bottom = (mainH - yLo) / mainH;
+          logI(S(`поля по вертикали: сверху ${(top * 100).toFixed(1)}%, снизу ${(bottom * 100).toFixed(1)}% (нужно ${(EXPORT_V_PAD * 100).toFixed(0)}%)`));
+          if (Math.abs(top - EXPORT_V_PAD) > 0.04 || Math.abs(bottom - EXPORT_V_PAD) > 0.04) logW(S('поля по вертикали отличаются от заданных: gap панели не применился?'));
+        } else logW(S('поля по вертикали не измерены'));
         // 6. Снимок и приведение к EXPORT_W × EXPORT_H
         stage('Снимок…');
         t0 = performance.now();
@@ -878,12 +901,15 @@
         ctx.fillStyle = bg; ctx.fillRect(0, 0, EXPORT_W, EXPORT_H);
         ctx.imageSmoothingQuality = 'high';
         ctx.drawImage(img, 0, 0, EXPORT_W, EXPORT_H);
+        const fw = cssNum('--mod-market-frame-w', 1);                  // тонкая рамка вокруг картинки (только на снимке)
+        ctx.strokeStyle = cssVar('--mod-market-frame') || '#2a3347'; ctx.lineWidth = fw;
+        ctx.strokeRect(fw / 2, fw / 2, EXPORT_W - fw, EXPORT_H - fw);
         const blob = await new Promise((r) => cv.toBlob(r, 'image/png'));
         if (!blob) throw mkErr('SHOT', 'не удалось сохранить снимок в PNG');
         logI(S(`снимок: библиотека отдала ${rawW}×${rawH}${rawW === EXPORT_W && rawH === EXPORT_H ? '' : ' (приведено к размеру)'}, файл ${EXPORT_W}×${EXPORT_H}, PNG ${(blob.size / 1024).toFixed(0)} КБ, ${lap(t0)}`));
         if (blob.size > 1048576) logW(S(`PNG больше 1 МБ (${(blob.size / 1048576).toFixed(2)} МБ): можно перейти на WebP высокого качества, по умолчанию оставлен PNG`));
         logI(S(`готово за ${lap(t00)}`));
-        return { blob, width: EXPORT_W, height: EXPORT_H, candles: n, firstTs: first, lastTs: last, dpr: window.devicePixelRatio, barSpace: bs, rawW, rawH, klinecharts: ver, fill };
+        return { blob, width: EXPORT_W, height: EXPORT_H, candles: n, firstTs: first, lastTs: last, mode, dpr: window.devicePixelRatio, barSpace: bs, rawW, rawH, klinecharts: ver, fill };
       } catch (e) {
         if (!e.code) logE(S(`сбой: ${msgOf(e)}`));
         throw e;
@@ -892,7 +918,7 @@
         busy = false;
       }
     }
-    return { build, isBusy: () => busy };
+    return { build, count, defaultCandles: CANDLES_DEFAULT, maxCandles: PAGE_LIMIT, isBusy: () => busy };
   })();
   window.MarketShot = MarketShot;
 
