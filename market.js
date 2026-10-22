@@ -30,6 +30,7 @@
   const EXPORT_W = 1600, EXPORT_H = 1032;   // итоговый файл ровно такого размера (пропорция 944:609, как рамка модалки)
   const CANDLES_DEFAULT = 500;              // сколько свечей брать, если поле «От» пусто (заканчиваются на «До»)
   const EXPORT_RIGHT_PAD = 0.1;             // пустое место справа от последней свечи, доля ширины области свечей
+  const EXPORT_YAXIS_GUESS = 90, EXPORT_XAXIS_GUESS = 40;   // первое приближение размеров правой и нижней осей, px (точные берутся из библиотеки)
   const EXPORT_PAD_Y = 0.18;                // поля сверху и снизу области свечей, доля её высоты (свечи не занимают всю высоту)
   const EXPORT_BAR_MAX = 12;                // верхний предел ширины свечи, px (на случай малого числа свечей)
   const EXPORT_FONT = 16;                   // размер подписей осей на снимке, px (картинка уменьшается в модалке)
@@ -830,17 +831,19 @@
         const k = window.klinecharts;
         let ver = ''; try { ver = typeof k.version === 'function' ? k.version() : ''; } catch { /* ок */ }
         logI(S(`библиотека готова${ver ? ' v' + ver : ''}${Chart.patched ? ', предел сжатия ' + Chart.patched : ''}, ${lap(t0)}`));
-        // 3. Скрытый график за пределами экрана (не display:none и не visibility: иначе размер нулевой)
+        // 3. Скрытый график за пределами экрана (не display:none и не visibility: иначе размер нулевой).
+        //    Оси НЕ выключаем (в v5.2 xAxis/yAxis.show = false давали панели нулевого размера, и getConvertPictureUrl падал на drawImage).
+        //    Размер контейнера = область свечей EXPORT_W × EXPORT_H + правая и нижняя оси; их размеры берём из библиотеки по факту.
         t0 = performance.now();
         container = document.createElement('div');
         container.setAttribute('aria-hidden', 'true');
-        container.style.cssText = `position:absolute;left:-99999px;top:0;width:${EXPORT_W}px;height:${EXPORT_H}px;pointer-events:none;`;
+        const setBox = (w, h) => { container.style.cssText = `position:absolute;left:-99999px;top:0;width:${Math.round(w)}px;height:${Math.round(h)}px;pointer-events:none;`; };
+        setBox(EXPORT_W + EXPORT_YAXIS_GUESS, EXPORT_H + EXPORT_XAXIS_GUESS);
         document.body.appendChild(container);
         const st = Chart.styles();                                    // цвета из CSS, как у живого графика
         st.candle.tooltip.showRule = 'none';                          // без подсказки свечи
         st.candle.priceMark.show = false;                             // без отметок high/low/последней цены
         st.crosshair.show = false;                                    // без перекрестия
-        st.xAxis.show = false; st.yAxis.show = false;                 // на картинке без шкалы времени и шкалы цены (на живом графике они остаются)
         const chart = k.init(container, { styles: st });
         if (!chart) throw mkErr('LIB', 'klinecharts.init вернул пустоту');
         safe('часовой пояс снимка', () => chart.setTimezone(Intl.DateTimeFormat().resolvedOptions().timeZone));
@@ -848,11 +851,29 @@
         safe('точность цены снимка', () => chart.setPriceVolumePrecision(pp, 0));
         // Поля сверху и снизу: у v9 есть gap панели (доля от высоты, значение меньше 1 = процент); по умолчанию у свечной панели top 0.2, bottom 0.1
         safe('поля по вертикали', () => chart.setPaneOptions({ id: 'candle_pane', gap: { top: EXPORT_PAD_Y, bottom: EXPORT_PAD_Y } }));
-        const box = container.getBoundingClientRect();
-        const mainW = safe('размер области свечей', () => chart.getSize('candle_pane', 'main').width, 0) || (EXPORT_W - 90);
-        const mainH = safe('размер области свечей', () => chart.getSize('candle_pane', 'main').height, 0);
-        logI(S(`контейнер ${Math.round(box.width)}×${Math.round(box.height)}, область свечей ${Math.round(mainW)}×${Math.round(mainH)}`));
-        // 4. Раскладка: n свечей на EXPORT_FILL ширины области свечей, справа пустое место
+        const sz = (pane, pos) => safe(`getSize ${pane}/${pos}`, () => chart.getSize(pane, pos), null);
+        const paneSizes = () => [['candle_pane', 'root'], ['candle_pane', 'main'], ['candle_pane', 'yAxis'], ['x_axis_pane', 'root'], ['x_axis_pane', 'main']]
+          .map(([p, pos]) => { const r = sz(p, pos); return { p, pos, w: r ? Math.round(r.width) : null, h: r ? Math.round(r.height) : null }; });
+        const zeroPanes = () => paneSizes().filter((x) => x.w === null || x.h === null || x.w <= 0 || x.h <= 0).map((x) => `${x.p}/${x.pos} ${x.w}×${x.h}`);
+        // Подгоняем контейнер так, чтобы область свечей была ровно EXPORT_W × EXPORT_H (оси добавляются снаружи)
+        const fit = async (tag) => {
+          for (let it = 0; it < 3; it++) {
+            const main = sz('candle_pane', 'main'); if (!main || !(main.width > 0) || !(main.height > 0)) break;
+            const cw = container.clientWidth, ch = container.clientHeight;
+            if (Math.abs(main.width - EXPORT_W) <= 1 && Math.abs(main.height - EXPORT_H) <= 1) break;
+            setBox(EXPORT_W + (cw - main.width), EXPORT_H + (ch - main.height));      // ось справа = ширина контейнера − ширина области, ось снизу = высота − высота области
+            safe('resize', () => chart.resize());
+            await frames(2); await sleep(60);
+          }
+          const main = sz('candle_pane', 'main') || { width: 0, height: 0 }, cw = container.clientWidth, ch = container.clientHeight;
+          const yW = Math.round(cw - main.width), xH = Math.round(ch - main.height);
+          logI(S(`${tag}: контейнер ${cw}×${ch}, область свечей ${Math.round(main.width)}×${Math.round(main.height)}, правая ось ${yW} px, нижняя ось ${xH} px`));
+          return { cw, ch, mw: main.width, mh: main.height, yW, xH };
+        };
+        let geo = await fit('размеры до данных');
+        if (!(geo.mw > 0) || !(geo.mh > 0)) throw mkErr('SHOT', `свечная панель нулевого размера (${zeroPanes().join('; ') || 'панели не найдены'})`);
+        // 4. Раскладка: n свечей на (1 − EXPORT_RIGHT_PAD) ширины области свечей (без осей), справа пустое место
+        const mainW = EXPORT_W, mainH = EXPORT_H;
         const wantSpace = Math.min(EXPORT_BAR_MAX, ((1 - EXPORT_RIGHT_PAD) * mainW) / n);
         const offset = EXPORT_RIGHT_PAD * mainW;
         const applyLayout = () => {
@@ -863,6 +884,8 @@
         const ready = new Promise((res) => { let d = false; const fin = () => { if (!d) { d = true; res(); } }; safe('onDataReady', () => chart.subscribeAction('onDataReady', fin)); setTimeout(fin, 3000); });
         chart.applyNewData(bars, false);                              // false: истории слева нет, подгрузка не запрашивается
         await ready;
+        await frames(2);
+        geo = await fit('размеры после данных');                      // ширина правой оси может измениться, когда появились подписи цены
         applyLayout();
         safe('к последней свече', () => chart.scrollToRealTime());
         let bs = safe('getBarSpace', () => chart.getBarSpace(), NaN);
@@ -881,15 +904,11 @@
         const x2 = safe('позиция последней свечи', () => chart.convertToPixel({ timestamp: last }, { paneId: 'candle_pane' }).x, NaN);
         const fill = Number.isFinite(x1) && Number.isFinite(x2) ? (x2 - x1) / mainW : NaN;
         logI(S(`отрисовка: ${lap(t0)}; видимый диапазон ${vr ? JSON.stringify(vr) : '?'}; x первой ${Number.isFinite(x1) ? Math.round(x1) : '?'}, x последней ${Number.isFinite(x2) ? Math.round(x2) : '?'}, доля ширины ${Number.isFinite(fill) ? (fill * 100).toFixed(1) + '%' : '?'}`));
-        // Оси скрыты: область свечей должна занять весь контейнер. Проверяем по факту (если библиотека оставила место под оси, ниже обрежем).
-        const mainW2 = safe('размер области свечей', () => chart.getSize('candle_pane', 'main').width, mainW), mainH2 = safe('размер области свечей', () => chart.getSize('candle_pane', 'main').height, mainH);
-        const axesGone = mainW2 >= EXPORT_W - 2 && (!mainH2 || mainH2 >= EXPORT_H - 2);
-        logI(S(`область свечей после отрисовки ${Math.round(mainW2)}×${Math.round(mainH2)} из ${EXPORT_W}×${EXPORT_H}${axesGone ? ' (оси убраны)' : ' (под оси осталось место: снимок будет обрезан)'}`));
-        // Поля сверху и снизу: измеряем, где нарисованы максимум и минимум; если gap панели сработал иначе, подгоняем (до двух поправок)
+        // Поля сверху и снизу (от высоты области свечей без осей): измеряем, где нарисованы максимум и минимум; при расхождении подгоняем gap (до двух поправок)
         const hi = Math.max(...bars.map((b) => b.high)), lo = Math.min(...bars.map((b) => b.low));
         const measure = () => {
           const yHi = safe('y максимума', () => chart.convertToPixel({ value: hi }, { paneId: 'candle_pane' }).y, NaN), yLo = safe('y минимума', () => chart.convertToPixel({ value: lo }, { paneId: 'candle_pane' }).y, NaN);
-          const H = mainH2 || mainH;
+          const H = geo.mh || mainH;
           return Number.isFinite(yHi) && Number.isFinite(yLo) && H ? { top: yHi / H, bottom: (H - yLo) / H } : null;
         };
         let m = measure(), gap = { top: EXPORT_PAD_Y, bottom: EXPORT_PAD_Y };
@@ -898,36 +917,57 @@
           const fix = (g, got) => Math.min(0.45, Math.max(0, g * EXPORT_PAD_Y / Math.max(got, 0.005)));
           gap = { top: fix(gap.top, m.top), bottom: fix(gap.bottom, m.bottom) };
           safe('поля по вертикали', () => chart.setPaneOptions({ id: 'candle_pane', gap }));
-          await frames(2); await sleep(150); await frames(1);
+          await frames(2); await sleep(200); await frames(1);                  // после подгонки не меньше двух кадров
           m = measure();
         }
         if (m) {
           logI(S(`поля по вертикали: сверху ${(m.top * 100).toFixed(1)}%, снизу ${(m.bottom * 100).toFixed(1)}% (нужно ${(EXPORT_PAD_Y * 100).toFixed(0)}%), gap ${gap.top.toFixed(3)}/${gap.bottom.toFixed(3)}`));
           if (Math.abs(m.top - EXPORT_PAD_Y) > 0.04 || Math.abs(m.bottom - EXPORT_PAD_Y) > 0.04) logW(S('поля по вертикали не совпали с заданными: gap панели не применился?'));
         } else logW(S('поля по вертикали не измерены'));
-        // 6. Снимок и приведение к EXPORT_W × EXPORT_H
+        // 6. Снимок: библиотека рисует весь контейнер (область свечей + оси) с devicePixelRatio; вырезаем левый верхний угол EXPORT_W × EXPORT_H без осей
         stage('Снимок…');
         t0 = performance.now();
-        const bg = cssVar('--mod-market-bg') || '#141414';
-        const url = chart.getConvertPictureUrl(false, 'png', bg);
-        if (!url || typeof url !== 'string') throw mkErr('SHOT', 'библиотека не вернула картинку');
+        const bg = cssVar('--mod-market-bg') || '#0B0B0B';
+        const shoot = () => {
+          if (!container.isConnected) throw mkErr('SHOT', 'контейнер графика уже удалён');
+          const zp = zeroPanes();
+          if (zp.length) throw mkErr('SHOT', `панели нулевого размера: ${zp.join('; ')}`);
+          const u = chart.getConvertPictureUrl(false, 'png', bg);
+          if (!u || typeof u !== 'string') throw mkErr('SHOT', 'библиотека не вернула картинку');
+          return u;
+        };
+        let url;
+        try { url = shoot(); }
+        catch (e1) {                                                  // один повтор через ~300 мс
+          logW(S(`снимок не получился (${msgOf(e1)}), повтор через 300 мс; панели: ${paneSizes().map((x) => `${x.p}/${x.pos} ${x.w}×${x.h}`).join('; ')}`));
+          await sleep(300); await frames(2);
+          try { url = shoot(); }
+          catch (e2) {
+            logE(S(`снимок не получился и после повтора: ${msgOf(e2)}; панели: ${paneSizes().map((x) => `${x.p}/${x.pos} ${x.w}×${x.h}`).join('; ')}`));
+            throw mkErr('SHOT', `Снимок графика не удался: ${msgOf(e2)}`);
+          }
+        }
         const img = await loadImage(url);
         const rawW = img.naturalWidth, rawH = img.naturalHeight;
+        const cw = container.clientWidth, ch = container.clientHeight;
+        const sx = rawW / cw, sy = rawH / ch;                          // во сколько раз картинка библиотеки больше контейнера (devicePixelRatio)
+        const cropW = Math.round(EXPORT_W * sx), cropH = Math.round(EXPORT_H * sy);
+        logI(S(`снимок: библиотека отдала ${rawW}×${rawH} (контейнер ${cw}×${ch}, масштаб ${sx.toFixed(3)}×${sy.toFixed(3)}, devicePixelRatio ${window.devicePixelRatio}); вырезка ${cropW}×${cropH} из левого верхнего угла (без осей: правая ${geo.yW} px, нижняя ${geo.xH} px)`));
+        if (cropW > rawW + 1 || cropH > rawH + 1) throw mkErr('SHOT', `вырезка ${cropW}×${cropH} больше снимка ${rawW}×${rawH}`);
         const cv = document.createElement('canvas'); cv.width = EXPORT_W; cv.height = EXPORT_H;
         const ctx = cv.getContext('2d');
         ctx.fillStyle = bg; ctx.fillRect(0, 0, EXPORT_W, EXPORT_H);
         ctx.imageSmoothingQuality = 'high';
-        if (axesGone) ctx.drawImage(img, 0, 0, EXPORT_W, EXPORT_H);
-        else ctx.drawImage(img, 0, 0, rawW * (mainW2 / EXPORT_W), rawH * ((mainH2 || EXPORT_H) / EXPORT_H), 0, 0, EXPORT_W, EXPORT_H);   // запасной путь: обрезать место под оси
+        ctx.drawImage(img, 0, 0, Math.min(cropW, rawW), Math.min(cropH, rawH), 0, 0, EXPORT_W, EXPORT_H);
         const fw = cssNum('--mod-market-frame-w', 1);                  // тонкая рамка вокруг картинки (только на снимке)
-        ctx.strokeStyle = cssVar('--mod-market-frame') || '#2a3347'; ctx.lineWidth = fw;
+        ctx.strokeStyle = cssVar('--mod-market-frame') || '#2a2a2a'; ctx.lineWidth = fw;
         ctx.strokeRect(fw / 2, fw / 2, EXPORT_W - fw, EXPORT_H - fw);
         const blob = await new Promise((r) => cv.toBlob(r, 'image/png'));
         if (!blob) throw mkErr('SHOT', 'не удалось сохранить снимок в PNG');
-        logI(S(`снимок: библиотека отдала ${rawW}×${rawH}${rawW === EXPORT_W && rawH === EXPORT_H ? '' : ' (приведено к размеру)'}, файл ${EXPORT_W}×${EXPORT_H}, PNG ${(blob.size / 1024).toFixed(0)} КБ, ${lap(t0)}`));
+        logI(S(`файл ${EXPORT_W}×${EXPORT_H}, PNG ${(blob.size / 1024).toFixed(0)} КБ, ${lap(t0)}`));
         if (blob.size > 1048576) logW(S(`PNG больше 1 МБ (${(blob.size / 1048576).toFixed(2)} МБ): можно перейти на WebP высокого качества, по умолчанию оставлен PNG`));
         logI(S(`готово за ${lap(t00)}`));
-        return { blob, width: EXPORT_W, height: EXPORT_H, candles: n, firstTs: first, lastTs: last, mode, dpr: window.devicePixelRatio, barSpace: bs, rawW, rawH, klinecharts: ver, fill };
+        return { blob, width: EXPORT_W, height: EXPORT_H, candles: n, firstTs: first, lastTs: last, mode, dpr: window.devicePixelRatio, barSpace: bs, rawW, rawH, klinecharts: ver, fill, yAxisW: geo.yW, xAxisH: geo.xH };
       } catch (e) {
         if (!e.code) logE(S(`сбой: ${msgOf(e)}`));
         throw e;
