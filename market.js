@@ -28,12 +28,8 @@
   const RSI_PERIOD = 14;
   // --- снимок для слота «Основная» (кнопка «Построить график» в модалке) ---
   const EXPORT_W = 1600, EXPORT_H = 1032;   // итоговый файл ровно такого размера (пропорция 944:609, как рамка модалки)
-  const CANDLES_DEFAULT = 500;              // сколько свечей брать, если поле «От» пусто (заканчиваются на «До»)
-  const EXPORT_RIGHT_PAD = 0.1;             // пустое место справа от последней свечи, доля ширины области свечей
-  const EXPORT_YAXIS_GUESS = 90, EXPORT_XAXIS_GUESS = 40;   // первое приближение размеров правой и нижней осей, px (точные берутся из библиотеки)
-  const EXPORT_PAD_Y = 0.18;                // поля сверху и снизу области свечей, доля её высоты (свечи не занимают всю высоту)
-  const EXPORT_BAR_MAX = 12;                // верхний предел ширины свечи, px (на случай малого числа свечей)
-  const EXPORT_FONT = 16;                   // размер подписей осей на снимке, px (картинка уменьшается в модалке)
+  const CAP_MIN_W = 240;                    // минимальная ширина рамки-кадра на экране, px (высота по пропорции)
+  const CAP_CANDLES = 1500;                 // сколько свечей грузится в режиме съёмки (с endTime = «До»)
   const HRAY = 'mktHRay';                // имя своего горизонтального луча
 
   /* ================= МЕЛОЧИ ================= */
@@ -397,6 +393,7 @@
   };
 
   /* ================= СОСТОЯНИЕ И КЭШ ================= */
+  let cap = null;                         // активная съёмка (MarketCapture) или null
   let sel = loadPrefs();                  // { symbol, tf }
   let sessId = 0;                         // растёт при смене монеты/таймфрейма: запоздалые ответы со старым id выбрасываются
   let entry = null;                       // кэш-запись текущей пары { bars, more, pp }
@@ -457,14 +454,16 @@
     showMsg('Загрузка…');
     while (id === sessId && active) {
       try {
-        const rows = await historyGet({ symbol, interval: tf, limit: PAGE_LIMIT }, `история ${symbol} ${tf}`, stale(id));
+        let rows = await historyGet(cap ? { symbol, interval: tf, endTime: cap.endMs, limit: CAP_CANDLES } : { symbol, interval: tf, limit: PAGE_LIMIT }, `история ${symbol} ${tf}`, stale(id));
         if (id !== sessId) return false;
+        if (cap) rows = rows.filter((r) => r[0] <= cap.endMs);        // режим съёмки: свечи не позже даты «До»
         if (!rows.length) { showMsg(`Нет данных по ${symbol}`, { err: true }); logW(L(`${symbol} ${tf}: Binance вернул пустую историю`)); return false; }
         const listed = symbols && symbols.find((x) => x.s === symbol);
         entry = { bars: rows.map(parseBar), more: rows.length >= PAGE_LIMIT, pp: listed && Number.isInteger(listed.pp) ? listed.pp : guessPrecision(rows) };
-        cachePut(keyOf(symbol, tf), entry);
+        if (!cap) cachePut(keyOf(symbol, tf), entry);                // кэш живого графика режим съёмки не трогает
         Chart.setPrecision(entry.pp); Chart.setData(entry.bars, entry.more);
         hideMsg(); logI(L(`история ${symbol} ${tf}: ${entry.bars.length} свечей`));
+        if (cap) MarketCapture.afterData();
         return true;
       } catch (e) {
         if (e.code === 'STALE') return false;
@@ -574,18 +573,18 @@
     });
   }
 
-  async function select(symbol, tf) {
+  async function select(symbol, tf, capture) {                    // capture: режим съёмки (без потока, метрик, кэша и записи выбора в localStorage)
     sessId++; const id = sessId;
     Stream.close(); stopTicker(); clearTimeout(loadTimer);
     gapRunning = false; gapBuffer = new Map(); loadingOlder = false; entry = null;
-    sel = { symbol, tf }; savePrefs(); syncControls();
+    sel = { symbol, tf }; if (!capture) savePrefs(); syncControls();
     view.querySelector('#mm-metrics').textContent = '';
     safe('пересоздание графика', () => Chart.rebuild());           // чистые шкалы (авто) и без линий при каждой смене монеты/таймфрейма
     logI(L(`выбрано ${symbol} ${tf}`));
-    const hit = cache.get(keyOf(symbol, tf));
+    const hit = capture ? null : cache.get(keyOf(symbol, tf));
     if (hit) { entry = hit; cachePut(keyOf(symbol, tf), hit); Chart.setPrecision(hit.pp); Chart.setData(hit.bars, hit.more); hideMsg(); }
-    else if (!(await loadInitial(id))) { if (id === sessId && entry) { connectStream(); startTicker(); } return; }
-    if (id !== sessId) return;
+    else if (!(await loadInitial(id))) { if (!capture && id === sessId && entry) { connectStream(); startTicker(); } return; }
+    if (id !== sessId || capture) return;
     connectStream(); startTicker();
   }
 
@@ -596,7 +595,7 @@
     renderStatus();
   }
   function resume() {                      // вернулись: то же состояние, дозагрузка пропущенного, линии не трогаем
-    if (!chartReady || streamWanted) return;
+    if (!chartReady || streamWanted || cap) return;
     Chart.resize();
     if (!entry) { select(sel.symbol, sel.tf); return; }          // история так и не загрузилась — начинаем заново
     connectStream(); startTicker();
@@ -617,6 +616,12 @@
         </div>
         <div id="mm-tfs" class="mod-market-tfs"></div>
         <span id="mm-status" class="mod-market-status" data-s="idle"><i class="mod-market-dot"></i><span>—</span></span>
+      </div>
+      <div id="mm-cap-bar" class="mod-market-cap-bar" hidden>
+        <span id="mm-cap-title" class="mod-market-cap-title"></span>
+        <span id="mm-cap-status" class="mod-market-cap-status"></span>
+        <button type="button" id="mm-cap-save" class="mod-market-cap-btn">Сохранить</button>
+        <button type="button" id="mm-cap-cancel" class="mod-market-cap-btn">Отмена</button>
       </div>
       <div class="mod-market-body">
         <div class="mod-market-tools">
@@ -682,7 +687,7 @@
       }
       paint();
     };
-    inp.addEventListener('focus', () => { inp.select(); if (!symbols) loadSymbols().then(filter, paint); filter(); });
+    inp.addEventListener('focus', () => { if (cap) { inp.blur(); return; } inp.select(); if (!symbols) loadSymbols().then(filter, paint); filter(); });
     inp.addEventListener('input', filter);
     inp.addEventListener('blur', () => { close(); syncControls(); });
     inp.addEventListener('keydown', (e) => {
@@ -712,6 +717,7 @@
       window.scrollTo(0, 0);
       openChart();
     } else {
+      if (cap) MarketCapture.cancel('выход через «Формации»', true);
       active = false; pause();
       view.hidden = true; g.hidden = false; document.body.classList.remove('mod-market-on');
       viewMode = 'gallery';
@@ -723,7 +729,7 @@
 
   // Первое открытие: грузим библиотеку, создаём график, выбираем сохранённую монету. Дальше только resume().
   function openChart() {
-    if (chartReady) { requestAnimationFrame(() => { Chart.resize(); resume(); }); return; }
+    if (chartReady) { requestAnimationFrame(() => { Chart.resize(); if (cap) MarketCapture.load(); else resume(); }); return; }
     if (chartInit) return;
     showMsg('Загрузка графика…');
     chartInit = (async () => {
@@ -735,7 +741,7 @@
         new ResizeObserver(() => Chart.resize()).observe($('#mm-chartwrap'));
         logI(L('создан'));
         loadSymbols().catch(() => {});                              // список монет подгружаем фоном
-        await select(sel.symbol, sel.tf);
+        if (cap) await MarketCapture.load(); else await select(sel.symbol, sel.tf);
       } catch (e) {
         logE(L(`не запустился: ${msgOf(e)}`));
         showMsg('График не запустился: ' + msgOf(e), { err: true, retry: () => { chartInit = null; openChart(); } });
@@ -773,214 +779,200 @@
   }
 
 
-  /* ================= СНИМОК ГРАФИКА ДЛЯ ЗАПИСИ (MarketShot.build) =================
-     Отдельный скрытый экземпляр KLineChart за пределами экрана: живой график, его поток и данные не трогаются.
-     Данные: один REST-запрос (та же очередь с паузами и защитой от 429/418, что и история во вкладке «График»). */
-  const MarketShot = (() => {
-    let busy = false;
-    const S = (t) => 'Построение: ' + t;
+  /* ================= РЕЖИМ СЪЁМКИ: ручной кадр для слота «Основная» (MarketCapture) =================
+     Окно «График» работает как обычно, но без потока и метрик, с монетой и ТФ из записи (заблокированы) и 1500 свечей до даты «До».
+     Поверх графика рамка-кадр с пропорцией EXPORT_W:EXPORT_H; «Сохранить» вырезает область рамки из снимка библиотеки. */
+  const MarketCapture = (() => {
+    const S = (t) => 'Съёмка: ' + t;
+    const RATIO = EXPORT_W / EXPORT_H;
     const kyiv = (ms) => new Date(ms).toLocaleString('ru-RU', { timeZone: 'Europe/Kyiv', hour12: false });
     const utc = (ms) => new Date(ms).toISOString().replace('T', ' ').slice(0, 19) + ' UTC';
     const both = (ms) => `${utc(ms)} (Киев ${kyiv(ms)})`;
     const frames = (n) => new Promise((r) => { const f = (i) => (i <= 0 ? r() : requestAnimationFrame(() => f(i - 1))); f(n); });
     const loadImage = (url) => new Promise((res, rej) => { const i = new Image(); i.onload = () => res(i); i.onerror = () => rej(new Error('снимок графика не открылся как картинка')); i.src = url; });
-    function mapErr(e) {                           // понятный текст для строки статуса
-      if (e.code === 'BLOCKED') return mkErr('LIMIT', `Лимит Binance: подожди ${Math.ceil((e.wait || 60000) / 1000)} с и повтори`, { orig: e });
-      if (e.code === 'NET') return mkErr('NET', 'Нет связи с Binance', { orig: e });
-      if (e.code === 'HTTP' && (e.bcode === -1121 || /invalid symbol/i.test(e.message))) return mkErr('SYMBOL', 'Нету на Binance', { orig: e });
-      if (e.code === 'HTTP' && e.status === 400) return mkErr('HTTP', 'Binance не принял запрос: ' + msgOf(e), { orig: e });
-      return e;
+    let frame = null, drag = null, layer = null, frameEl = null, dims = [];
+    const el$ = (id) => view.querySelector(id);
+    const chartBox = () => el$('#mm-chart');
+    // Границы кадра: только основная панель свечей (без шкал и RSI): левый верхний угол контейнера, размер из getSize
+    const bounds = () => { const m = Chart.chart ? safe('getSize', () => Chart.chart.getSize('candle_pane', 'main'), null) : null; return m && m.width > 0 && m.height > 0 ? { w: m.width, h: m.height } : { w: chartBox().clientWidth, h: chartBox().clientHeight }; };
+    const clampFrame = () => {
+      if (!frame) return;
+      const B = bounds();
+      frame.w = Math.min(Math.max(frame.w, Math.min(CAP_MIN_W, B.w)), B.w, B.h * RATIO);
+      frame.h = frame.w / RATIO;
+      frame.x = Math.min(Math.max(frame.x, 0), B.w - frame.w);
+      frame.y = Math.min(Math.max(frame.y, 0), B.h - frame.h);
+    };
+    function paint() {
+      if (!layer) return;
+      layer.hidden = !frame;
+      if (!frame) return;
+      const W = chartBox().clientWidth, H = chartBox().clientHeight, f = frame;
+      frameEl.style.cssText = `left:${f.x}px;top:${f.y}px;width:${f.w}px;height:${f.h}px;`;
+      const set = (d, l, t, w, h) => { d.style.cssText = `left:${l}px;top:${t}px;width:${Math.max(0, w)}px;height:${Math.max(0, h)}px;`; };
+      set(dims[0], 0, 0, W, f.y); set(dims[1], 0, f.y + f.h, W, H - f.y - f.h); set(dims[2], 0, f.y, f.x, f.h); set(dims[3], f.x + f.w, f.y, W - f.x - f.w, f.h);
     }
-    // Библиотека рисует с devicePixelRatio, поэтому размер её картинки зависит от масштаба экрана; приводим к EXPORT_W × EXPORT_H
-    // fromMs: необязательно (null = последние CANDLES_DEFAULT свечей до endMs); с fromMs берутся свечи от «От» до «До» включительно
-    function count(fromMs, endMs, timeframe) {
-      const tf = TF_MS[timeframe]; if (!tf || fromMs == null) return null;
-      return Math.floor(endMs / tf) - Math.floor(fromMs / tf) + 1;
+    const setStatus = (t, err) => { const e = el$('#mm-cap-status'); if (e) { e.textContent = t || ''; e.classList.toggle('err', !!err); } };
+    const lockUi = (on) => {
+      view.classList.toggle('mod-market-cap-on', on);
+      el$('#mm-cap-bar').hidden = !on;
+      el$('#mm-sym').readOnly = on;
+      view.querySelectorAll('.mod-market-tf').forEach((b) => { b.disabled = on; });
+      if (on) { el$('#mm-metrics').textContent = ''; }
+    };
+    function initDom() {
+      const wrap = el$('#mm-chartwrap');
+      layer = document.createElement('div'); layer.className = 'mod-market-cap-layer'; layer.hidden = true;
+      dims = [0, 1, 2, 3].map(() => { const d = document.createElement('div'); d.className = 'mod-market-cap-dim'; layer.appendChild(d); return d; });
+      frameEl = document.createElement('div'); frameEl.className = 'mod-market-cap-frame';
+      ['top', 'bottom', 'left', 'right'].forEach((e) => { const d = document.createElement('div'); d.className = 'mod-market-cap-edge'; d.dataset.edge = e; frameEl.appendChild(d); });
+      ['nw', 'ne', 'sw', 'se'].forEach((c) => { const d = document.createElement('div'); d.className = 'mod-market-cap-h'; d.dataset.corner = c; frameEl.appendChild(d); });
+      layer.appendChild(frameEl); wrap.appendChild(layer);
+      frameEl.addEventListener('pointerdown', (e) => {                    // ловим только границу и ручки; внутри рамки события идут к графику
+        const h = e.target.closest('[data-corner]'), ed = e.target.closest('[data-edge]');
+        if ((!h && !ed) || !frame || e.button !== 0) return;
+        e.preventDefault(); e.stopPropagation();
+        drag = { mode: h ? h.dataset.corner : 'move', sx: e.clientX, sy: e.clientY, f: { ...frame } };
+        try { e.target.setPointerCapture(e.pointerId); } catch { /* ок */ }
+      });
+      frameEl.addEventListener('pointermove', (e) => {
+        if (!drag) return;
+        const B = bounds(), f0 = drag.f, dx = e.clientX - drag.sx, dy = e.clientY - drag.sy;
+        if (drag.mode === 'move') { frame = { ...f0, x: f0.x + dx, y: f0.y + dy }; }
+        else {                                                             // масштаб за угол с сохранением пропорции; противоположный угол стоит на месте
+          const sx = drag.mode.includes('e') ? 1 : -1, sy = drag.mode.includes('s') ? 1 : -1;
+          const ax = sx > 0 ? f0.x : f0.x + f0.w, ay = sy > 0 ? f0.y : f0.y + f0.h;
+          const px = (sx > 0 ? f0.x + f0.w : f0.x) + dx, py = (sy > 0 ? f0.y + f0.h : f0.y) + dy;
+          const maxW = Math.min(sx > 0 ? B.w - ax : ax, (sy > 0 ? B.h - ay : ay) * RATIO);
+          const w = Math.min(Math.max(Math.max(Math.abs(px - ax), Math.abs(py - ay) * RATIO), Math.min(CAP_MIN_W, maxW)), maxW), h = w / RATIO;
+          frame = { x: sx > 0 ? ax : ax - w, y: sy > 0 ? ay : ay - h, w, h };
+        }
+        clampFrame(); paint();
+      });
+      const end = () => { drag = null; };
+      frameEl.addEventListener('pointerup', end); frameEl.addEventListener('pointercancel', end);
+      new ResizeObserver(() => { clampFrame(); paint(); }).observe(wrap);   // окно изменилось: кадр остаётся в границах
+      el$('#mm-cap-save').onclick = () => save();
+      el$('#mm-cap-cancel').onclick = () => cancel('кнопка «Отмена»');
     }
-    async function build({ symbol, timeframe, fromMs, endMs, onStage }) {
-      if (busy) throw mkErr('BUSY', 'Построение уже идёт');
-      busy = true;
-      const t00 = performance.now(), stage = (t) => { if (onStage) onStage(t); };
-      const lap = (t0) => Math.round(performance.now() - t0) + ' мс';
-      let container = null;
+    // Начальное положение: высота ~85% панели свечей, последняя свеча примерно на 90% ширины рамки
+    async function afterData() {
+      if (!cap || !Chart.chart || !entry || !entry.bars.length) return;
+      const id = sessId;
+      await frames(2);
+      let B = bounds();
+      safe('отступ справа', () => { if (typeof Chart.chart.setMaxOffsetRightDistance === 'function') Chart.chart.setMaxOffsetRightDistance(B.w); Chart.chart.setOffsetRightDistance(0.25 * B.w); });   // справа пустой запас
+      await frames(2); await sleep(120);
+      if (!cap || id !== sessId) return;
+      B = bounds();
+      const last = entry.bars[entry.bars.length - 1].timestamp;
+      const lastX = safe('x последней свечи', () => Chart.chart.convertToPixel({ timestamp: last }, { paneId: 'candle_pane' }).x, NaN);
+      let h = 0.85 * B.h, w = h * RATIO;
+      if (w > B.w) { w = B.w; h = w / RATIO; }
+      frame = { x: (Number.isFinite(lastX) ? lastX : 0.75 * B.w) - 0.9 * w, y: (B.h - h) / 2, w, h };
+      clampFrame(); paint();
+      logI(S(`график готов: свечей ${entry.bars.length}, область свечей ${Math.round(B.w)}×${Math.round(B.h)}, рамка ${Math.round(frame.w)}×${Math.round(frame.h)}, последняя свеча на x=${Number.isFinite(lastX) ? Math.round(lastX) : '?'}`));
+    }
+    function load() { return select(cap.symbol, cap.timeframe, true); }
+    function start(o) {
+      if (cap) return false;
+      cap = { ...o, busy: false, prev: { ...sel } };
+      frame = null;
+      lockUi(true); setStatus('Загрузка свечей…');
+      el$('#mm-cap-title').textContent = `Режим съёмки: ${o.symbol} ${o.timeframe} до ${new Date(o.endMs).toLocaleString('ru-RU', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' }).replace(',', '')}`;
+      el$('#mm-sym').value = o.symbol;
+      view.querySelectorAll('.mod-market-tf').forEach((b) => b.classList.toggle('active', b.dataset.tf === o.timeframe));
+      logI(S(`старт: ${o.symbol} ${o.timeframe}, «До» ${both(o.endMs)}`));
+      setView('market');                                              // откроет график; данные грузит openChart → MarketCapture.load
+      if (chartReady) load();
+      return true;
+    }
+    // Выход: прежний вид живого графика (выбор монеты и ТФ возвращается, данные перезагрузятся при следующем открытии вкладки)
+    function exit(noView) {
+      const c = cap; cap = null; frame = null; drag = null;
+      lockUi(false); paint(); setStatus('');
+      sessId++; entry = null; sel = c.prev; syncControls();
+      safe('пересоздание графика', () => Chart.rebuild());
+      if (!noView && viewMode === 'market') setView('gallery');
+      return c;
+    }
+    function cancel(why, noView) {
+      if (!cap) return;
+      const c = exit(noView);
+      logI(S(`отмена (${why})`));
+      if (c.onCancel) c.onCancel();
+    }
+    async function save() {
+      if (!cap || cap.busy) return;
+      if (!frame || !Chart.chart) { setStatus('Рамка ещё не готова: дождись загрузки графика', true); return; }
+      const c = cap; c.busy = true; setStatus('Сохранение…');
+      el$('#mm-cap-save').disabled = true;
+      const t00 = performance.now();
+      let ok = false;
       try {
-        const tfms = TF_MS[timeframe], endA = Math.floor(endMs / tfms) * tfms, fromA = fromMs != null ? Math.floor(fromMs / tfms) * tfms : null;
-        const mode = fromA != null ? 'range' : 'last' + CANDLES_DEFAULT;
-        const expected = fromA != null ? (endA - fromA) / tfms + 1 : null;
-        logI(S(`старт: ${symbol} ${timeframe}, ${fromA != null ? `от ${both(fromMs)} ` : ''}до ${both(endMs)}, режим ${mode}${expected != null ? `, ожидается свечей ${expected}` : `, свечей ${CANDLES_DEFAULT}`}, devicePixelRatio ${window.devicePixelRatio}`));
-        if (fromA != null && fromA > endA) throw mkErr('RANGE', '«От» должно быть раньше «До»');
-        if (expected != null && expected > PAGE_LIMIT) throw mkErr('TOO_MANY', `Слишком много свечей: ${expected}, максимум ${PAGE_LIMIT}`);
-        // 1. Данные: endTime = дата в мс; Binance в документации не описывает, по какому времени фильтрует endTime, поэтому лишнее отбрасываем сами
-        stage('Загрузка свечей…');
-        let t0 = performance.now(), rows;
-        try { rows = await historyGet(fromA != null ? { symbol, interval: timeframe, startTime: fromA, endTime: endMs, limit: PAGE_LIMIT } : { symbol, interval: timeframe, endTime: endMs, limit: CANDLES_DEFAULT }, `построение ${symbol} ${timeframe}`, () => false); }
-        catch (e) { logE(S(`свечи не получены: ${msgOf(e)}`)); throw mapErr(e); }
-        const got = rows.length;
-        rows = rows.filter((r) => r[0] <= endMs && (fromA == null || r[0] >= fromA));      // лишнего не оставляем
-        const want = expected != null ? expected : CANDLES_DEFAULT;
-        logI(S(`свечи: пришло ${got}, оставлено ${rows.length} из ${want} нужных${rows.length < want ? ' (меньше, берём сколько есть)' : ''}, отброшено вне периода ${got - rows.length}, ${lap(t0)}`));
-        if (rows.length < want) logW(S(`пришло ${rows.length} свечей вместо ${want}: ${fromA != null ? 'в периоде не было торгов или монета листингована позже' : 'у монеты меньше истории до этой даты'}`));
-        if (!rows.length) { logW(S(`нет данных за эту дату (${symbol} ${timeframe}, конец ${both(endMs)})`)); throw mkErr('EMPTY', 'Нет данных за эту дату'); }
-        const bars = rows.map(parseBar), n = bars.length, first = bars[0].timestamp, last = bars[n - 1].timestamp;
-        logI(S(`первая свеча ${both(first)}, последняя ${both(last)}`));
-        if (endMs - last > 2 * TF_MS[timeframe]) logW(S(`последняя свеча ${Math.round((endMs - last) / TF_MS[timeframe])} периодов раньше даты: у монеты нет торгов около этой даты`));
-        // 2. Библиотека
-        stage('Подготовка графика…');
-        t0 = performance.now();
-        await Chart.loadLib();
-        const k = window.klinecharts;
-        let ver = ''; try { ver = typeof k.version === 'function' ? k.version() : ''; } catch { /* ок */ }
-        logI(S(`библиотека готова${ver ? ' v' + ver : ''}${Chart.patched ? ', предел сжатия ' + Chart.patched : ''}, ${lap(t0)}`));
-        // 3. Скрытый график за пределами экрана (не display:none и не visibility: иначе размер нулевой).
-        //    Оси НЕ выключаем (в v5.2 xAxis/yAxis.show = false давали панели нулевого размера, и getConvertPictureUrl падал на drawImage).
-        //    Размер контейнера = область свечей EXPORT_W × EXPORT_H + правая и нижняя оси; их размеры берём из библиотеки по факту.
-        t0 = performance.now();
-        container = document.createElement('div');
-        container.setAttribute('aria-hidden', 'true');
-        const setBox = (w, h) => { container.style.cssText = `position:absolute;left:-99999px;top:0;width:${Math.round(w)}px;height:${Math.round(h)}px;pointer-events:none;`; };
-        setBox(EXPORT_W + EXPORT_YAXIS_GUESS, EXPORT_H + EXPORT_XAXIS_GUESS);
-        document.body.appendChild(container);
-        const st = Chart.styles();                                    // цвета из CSS, как у живого графика
-        st.candle.tooltip.showRule = 'none';                          // без подсказки свечи
-        st.candle.priceMark.show = false;                             // без отметок high/low/последней цены
-        st.crosshair.show = false;                                    // без перекрестия
-        const chart = k.init(container, { styles: st });
-        if (!chart) throw mkErr('LIB', 'klinecharts.init вернул пустоту');
-        safe('часовой пояс снимка', () => chart.setTimezone(Intl.DateTimeFormat().resolvedOptions().timeZone));
-        const pp = guessPrecision(rows);
-        safe('точность цены снимка', () => chart.setPriceVolumePrecision(pp, 0));
-        // Поля сверху и снизу: у v9 есть gap панели (доля от высоты, значение меньше 1 = процент); по умолчанию у свечной панели top 0.2, bottom 0.1
-        safe('поля по вертикали', () => chart.setPaneOptions({ id: 'candle_pane', gap: { top: EXPORT_PAD_Y, bottom: EXPORT_PAD_Y } }));
-        const sz = (pane, pos) => safe(`getSize ${pane}/${pos}`, () => chart.getSize(pane, pos), null);
-        const paneSizes = () => [['candle_pane', 'root'], ['candle_pane', 'main'], ['candle_pane', 'yAxis'], ['x_axis_pane', 'root'], ['x_axis_pane', 'main']]
-          .map(([p, pos]) => { const r = sz(p, pos); return { p, pos, w: r ? Math.round(r.width) : null, h: r ? Math.round(r.height) : null }; });
-        const zeroPanes = () => paneSizes().filter((x) => x.w === null || x.h === null || x.w <= 0 || x.h <= 0).map((x) => `${x.p}/${x.pos} ${x.w}×${x.h}`);
-        // Подгоняем контейнер так, чтобы область свечей была ровно EXPORT_W × EXPORT_H (оси добавляются снаружи)
-        const fit = async (tag) => {
-          for (let it = 0; it < 3; it++) {
-            const main = sz('candle_pane', 'main'); if (!main || !(main.width > 0) || !(main.height > 0)) break;
-            const cw = container.clientWidth, ch = container.clientHeight;
-            if (Math.abs(main.width - EXPORT_W) <= 1 && Math.abs(main.height - EXPORT_H) <= 1) break;
-            setBox(EXPORT_W + (cw - main.width), EXPORT_H + (ch - main.height));      // ось справа = ширина контейнера − ширина области, ось снизу = высота − высота области
-            safe('resize', () => chart.resize());
-            await frames(2); await sleep(60);
-          }
-          const main = sz('candle_pane', 'main') || { width: 0, height: 0 }, cw = container.clientWidth, ch = container.clientHeight;
-          const yW = Math.round(cw - main.width), xH = Math.round(ch - main.height);
-          logI(S(`${tag}: контейнер ${cw}×${ch}, область свечей ${Math.round(main.width)}×${Math.round(main.height)}, правая ось ${yW} px, нижняя ось ${xH} px`));
-          return { cw, ch, mw: main.width, mh: main.height, yW, xH };
-        };
-        let geo = await fit('размеры до данных');
-        if (!(geo.mw > 0) || !(geo.mh > 0)) throw mkErr('SHOT', `свечная панель нулевого размера (${zeroPanes().join('; ') || 'панели не найдены'})`);
-        // 4. Раскладка: n свечей на (1 − EXPORT_RIGHT_PAD) ширины области свечей (без осей), справа пустое место
-        const mainW = EXPORT_W, mainH = EXPORT_H;
-        const wantSpace = Math.min(EXPORT_BAR_MAX, ((1 - EXPORT_RIGHT_PAD) * mainW) / n);
-        const offset = EXPORT_RIGHT_PAD * mainW;
-        const applyLayout = () => {
-          safe('отступ справа', () => { if (typeof chart.setMaxOffsetRightDistance === 'function') chart.setMaxOffsetRightDistance(mainW); chart.setOffsetRightDistance(offset); });
-          safe('ширина свечи', () => chart.setBarSpace(wantSpace));
-        };
-        applyLayout();
-        const ready = new Promise((res) => { let d = false; const fin = () => { if (!d) { d = true; res(); } }; safe('onDataReady', () => chart.subscribeAction('onDataReady', fin)); setTimeout(fin, 3000); });
-        chart.applyNewData(bars, false);                              // false: истории слева нет, подгрузка не запрашивается
-        await ready;
-        await frames(2);
-        geo = await fit('размеры после данных');                      // ширина правой оси может измениться, когда появились подписи цены
-        applyLayout();
-        safe('к последней свече', () => chart.scrollToRealTime());
-        let bs = safe('getBarSpace', () => chart.getBarSpace(), NaN);
-        if (Number.isFinite(bs) && Math.abs(bs - wantSpace) > 0.01) {
-          logW(S(`ширина свечи ${bs.toFixed(3)} px вместо ${wantSpace.toFixed(3)} (библиотека отклонила значение: предел сжатия не расширен?)`));
-          if (wantSpace < 1) { safe('ширина свечи 1', () => chart.setBarSpace(1)); bs = safe('getBarSpace', () => chart.getBarSpace(), bs); }
+        if (c.beforeSave && !(await c.beforeSave())) { setStatus('Сохранение отменено'); logI(S('сохранение отменено (замена основной не подтверждена)')); return; }
+        const chart = Chart.chart, box = chartBox(), cw = box.clientWidth, ch = box.clientHeight, f = { ...frame };
+        logI(S(`сохранение: контейнер ${cw}×${ch}, рамка ${Math.round(f.w)}×${Math.round(f.h)} в (${Math.round(f.x)}, ${Math.round(f.y)}), devicePixelRatio ${window.devicePixelRatio}`));
+        // свечи внутри рамки (до скрытия подсказок)
+        const list = safe('getDataList', () => chart.getDataList(), []);
+        const pts = safe('convertFromPixel', () => chart.convertFromPixel([{ x: f.x }, { x: f.x + f.w }], { paneId: 'candle_pane' }), null);
+        let firstTs = null, lastTs = null, inFrame = 0;
+        if (pts && pts.length === 2 && list.length) {
+          const iL = Number.isFinite(pts[0].dataIndex) ? pts[0].dataIndex : list.findIndex((b) => b.timestamp >= pts[0].timestamp);
+          const iR = Number.isFinite(pts[1].dataIndex) ? pts[1].dataIndex : (() => { let k = -1; list.forEach((b, i) => { if (b.timestamp <= pts[1].timestamp) k = i; }); return k; })();
+          const a = Math.min(Math.max(Math.ceil(iL), 0), list.length - 1), b2 = Math.min(Math.max(Math.floor(iR), 0), list.length - 1);
+          if (b2 >= a) { firstTs = list[a].timestamp; lastTs = list[b2].timestamp; inFrame = b2 - a + 1; }
         }
-        logI(S(`свечей ${n}, ширина свечи ${Number.isFinite(bs) ? bs.toFixed(3) : '?'} px (нужно ${wantSpace.toFixed(3)}), отступ справа ${Math.round(offset)} px, точность цены ${pp}`));
-        // 5. Дождаться отрисовки: данные применены, шрифты, не меньше двух кадров
-        stage('Отрисовка…');
-        if (document.hidden) logW(S('вкладка браузера скрыта: отрисовка может быть неполной'));
-        try { await document.fonts.ready; } catch { /* ок */ }
-        await frames(2); await sleep(200); await frames(1);
-        const vr = safe('getVisibleRange', () => chart.getVisibleRange(), null);
-        const x1 = safe('позиция первой свечи', () => chart.convertToPixel({ timestamp: first }, { paneId: 'candle_pane' }).x, NaN);
-        const x2 = safe('позиция последней свечи', () => chart.convertToPixel({ timestamp: last }, { paneId: 'candle_pane' }).x, NaN);
-        const fill = Number.isFinite(x1) && Number.isFinite(x2) ? (x2 - x1) / mainW : NaN;
-        logI(S(`отрисовка: ${lap(t0)}; видимый диапазон ${vr ? JSON.stringify(vr) : '?'}; x первой ${Number.isFinite(x1) ? Math.round(x1) : '?'}, x последней ${Number.isFinite(x2) ? Math.round(x2) : '?'}, доля ширины ${Number.isFinite(fill) ? (fill * 100).toFixed(1) + '%' : '?'}`));
-        // Поля сверху и снизу (от высоты области свечей без осей): измеряем, где нарисованы максимум и минимум; при расхождении подгоняем gap (до двух поправок)
-        const hi = Math.max(...bars.map((b) => b.high)), lo = Math.min(...bars.map((b) => b.low));
-        const measure = () => {
-          const yHi = safe('y максимума', () => chart.convertToPixel({ value: hi }, { paneId: 'candle_pane' }).y, NaN), yLo = safe('y минимума', () => chart.convertToPixel({ value: lo }, { paneId: 'candle_pane' }).y, NaN);
-          const H = geo.mh || mainH;
-          return Number.isFinite(yHi) && Number.isFinite(yLo) && H ? { top: yHi / H, bottom: (H - yLo) / H } : null;
-        };
-        let m = measure(), gap = { top: EXPORT_PAD_Y, bottom: EXPORT_PAD_Y };
-        for (let it = 0; it < 2 && m && (Math.abs(m.top - EXPORT_PAD_Y) > 0.025 || Math.abs(m.bottom - EXPORT_PAD_Y) > 0.025); it++) {
-          logW(S(`поля по вертикали: сверху ${(m.top * 100).toFixed(1)}%, снизу ${(m.bottom * 100).toFixed(1)}% вместо ${(EXPORT_PAD_Y * 100).toFixed(0)}%, подгоняю gap`));
-          const fix = (g, got) => Math.min(0.45, Math.max(0, g * EXPORT_PAD_Y / Math.max(got, 0.005)));
-          gap = { top: fix(gap.top, m.top), bottom: fix(gap.bottom, m.bottom) };
-          safe('поля по вертикали', () => chart.setPaneOptions({ id: 'candle_pane', gap }));
-          await frames(2); await sleep(200); await frames(1);                  // после подгонки не меньше двух кадров
-          m = measure();
-        }
-        if (m) {
-          logI(S(`поля по вертикали: сверху ${(m.top * 100).toFixed(1)}%, снизу ${(m.bottom * 100).toFixed(1)}% (нужно ${(EXPORT_PAD_Y * 100).toFixed(0)}%), gap ${gap.top.toFixed(3)}/${gap.bottom.toFixed(3)}`));
-          if (Math.abs(m.top - EXPORT_PAD_Y) > 0.04 || Math.abs(m.bottom - EXPORT_PAD_Y) > 0.04) logW(S('поля по вертикали не совпали с заданными: gap панели не применился?'));
-        } else logW(S('поля по вертикали не измерены'));
-        // 6. Снимок: библиотека рисует весь контейнер (область свечей + оси) с devicePixelRatio; вырезаем левый верхний угол EXPORT_W × EXPORT_H без осей
-        stage('Снимок…');
-        t0 = performance.now();
+        if (firstTs != null) logI(S(`свечей в рамке ${inFrame}: первая ${both(firstTs)}, последняя ${both(lastTs)}`)); else logW(S('свечи в рамке не определены (convertFromPixel не дал результата)'));
+        // без подсказки свечи, перекрестия и метки последней цены (линии пользователя не попадают: includeOverlay = false)
         const bg = cssVar('--mod-market-bg') || '#0B0B0B';
-        const shoot = () => {
-          if (!container.isConnected) throw mkErr('SHOT', 'контейнер графика уже удалён');
-          const zp = zeroPanes();
-          if (zp.length) throw mkErr('SHOT', `панели нулевого размера: ${zp.join('; ')}`);
-          const u = chart.getConvertPictureUrl(false, 'png', bg);
-          if (!u || typeof u !== 'string') throw mkErr('SHOT', 'библиотека не вернула картинку');
-          return u;
-        };
         let url;
-        try { url = shoot(); }
-        catch (e1) {                                                  // один повтор через ~300 мс
-          logW(S(`снимок не получился (${msgOf(e1)}), повтор через 300 мс; панели: ${paneSizes().map((x) => `${x.p}/${x.pos} ${x.w}×${x.h}`).join('; ')}`));
-          await sleep(300); await frames(2);
-          try { url = shoot(); }
-          catch (e2) {
-            logE(S(`снимок не получился и после повтора: ${msgOf(e2)}; панели: ${paneSizes().map((x) => `${x.p}/${x.pos} ${x.w}×${x.h}`).join('; ')}`));
-            throw mkErr('SHOT', `Снимок графика не удался: ${msgOf(e2)}`);
-          }
+        safe('скрыть подсказки', () => chart.setStyles({ candle: { tooltip: { showRule: 'none' }, priceMark: { last: { show: false } } }, crosshair: { show: false } }));
+        try {
+          await frames(2); await sleep(120);
+          url = chart.getConvertPictureUrl(false, 'png', bg);
+        } finally {
+          safe('вернуть подсказки', () => chart.setStyles({ candle: { tooltip: { showRule: 'always' }, priceMark: { last: { show: true } } }, crosshair: { show: true } }));
         }
+        if (!url || typeof url !== 'string') throw mkErr('SHOT', 'библиотека не вернула картинку');
         const img = await loadImage(url);
-        const rawW = img.naturalWidth, rawH = img.naturalHeight;
-        const cw = container.clientWidth, ch = container.clientHeight;
-        const sx = rawW / cw, sy = rawH / ch;                          // во сколько раз картинка библиотеки больше контейнера (devicePixelRatio)
-        const cropW = Math.round(EXPORT_W * sx), cropH = Math.round(EXPORT_H * sy);
-        logI(S(`снимок: библиотека отдала ${rawW}×${rawH} (контейнер ${cw}×${ch}, масштаб ${sx.toFixed(3)}×${sy.toFixed(3)}, devicePixelRatio ${window.devicePixelRatio}); вырезка ${cropW}×${cropH} из левого верхнего угла (без осей: правая ${geo.yW} px, нижняя ${geo.xH} px)`));
-        if (cropW > rawW + 1 || cropH > rawH + 1) throw mkErr('SHOT', `вырезка ${cropW}×${cropH} больше снимка ${rawW}×${rawH}`);
+        const rawW = img.naturalWidth, rawH = img.naturalHeight, sx = rawW / cw, sy = rawH / ch;      // devicePixelRatio и отношение картинки библиотеки к контейнеру
+        const cx = f.x * sx, cy = f.y * sy, cWid = f.w * sx, cHei = f.h * sy;
+        const scale = EXPORT_W / cWid;                                                                   // во сколько раз вырезка увеличена до итогового размера
+        logI(S(`снимок: библиотека отдала ${rawW}×${rawH} (масштаб ${sx.toFixed(3)}×${sy.toFixed(3)}); вырезка ${Math.round(cWid)}×${Math.round(cHei)} из (${Math.round(cx)}, ${Math.round(cy)}); итог ${EXPORT_W}×${EXPORT_H}, увеличение ${scale.toFixed(2)}×`));
+        if (scale > 1.5) logW(S(`вырезка меньше итогового размера: картинка увеличивается в ${scale.toFixed(2)} раза и будет менее резкой (увеличь рамку или масштаб экрана)`));
+        if (cx + cWid > rawW + 1 || cy + cHei > rawH + 1) throw mkErr('SHOT', 'рамка выходит за снимок');
         const cv = document.createElement('canvas'); cv.width = EXPORT_W; cv.height = EXPORT_H;
         const ctx = cv.getContext('2d');
         ctx.fillStyle = bg; ctx.fillRect(0, 0, EXPORT_W, EXPORT_H);
         ctx.imageSmoothingQuality = 'high';
-        ctx.drawImage(img, 0, 0, Math.min(cropW, rawW), Math.min(cropH, rawH), 0, 0, EXPORT_W, EXPORT_H);
-        const fw = cssNum('--mod-market-frame-w', 1);                  // тонкая рамка вокруг картинки (только на снимке)
+        ctx.drawImage(img, cx, cy, Math.min(cWid, rawW - cx), Math.min(cHei, rawH - cy), 0, 0, EXPORT_W, EXPORT_H);
+        const fw = cssNum('--mod-market-frame-w', 1);                                                    // тонкая рамка вокруг картинки
         ctx.strokeStyle = cssVar('--mod-market-frame') || '#2a2a2a'; ctx.lineWidth = fw;
         ctx.strokeRect(fw / 2, fw / 2, EXPORT_W - fw, EXPORT_H - fw);
         const blob = await new Promise((r) => cv.toBlob(r, 'image/png'));
         if (!blob) throw mkErr('SHOT', 'не удалось сохранить снимок в PNG');
-        logI(S(`файл ${EXPORT_W}×${EXPORT_H}, PNG ${(blob.size / 1024).toFixed(0)} КБ, ${lap(t0)}`));
-        if (blob.size > 1048576) logW(S(`PNG больше 1 МБ (${(blob.size / 1048576).toFixed(2)} МБ): можно перейти на WebP высокого качества, по умолчанию оставлен PNG`));
-        logI(S(`готово за ${lap(t00)}`));
-        return { blob, width: EXPORT_W, height: EXPORT_H, candles: n, firstTs: first, lastTs: last, mode, dpr: window.devicePixelRatio, barSpace: bs, rawW, rawH, klinecharts: ver, fill, yAxisW: geo.yW, xAxisH: geo.xH };
+        logI(S(`файл ${EXPORT_W}×${EXPORT_H}, PNG ${(blob.size / 1024).toFixed(0)} КБ, снимок и вырезка ${Math.round(performance.now() - t00)} мс`));
+        let ver = ''; try { ver = typeof klinecharts.version === 'function' ? klinecharts.version() : ''; } catch { /* ок */ }
+        await c.onSave({ blob, width: EXPORT_W, height: EXPORT_H, params: {
+          mode: 'manual', anchor_end_ms: c.endMs, first_ms: firstTs, last_ms: lastTs, candles_in_frame: inFrame || null,
+          dpr: window.devicePixelRatio, scale: +scale.toFixed(3), frame_px: { w: Math.round(f.w), h: Math.round(f.h) },
+          source: 'binance_usdm', klinecharts: ver || null } });
+        ok = true;
       } catch (e) {
-        if (!e.code) logE(S(`сбой: ${msgOf(e)}`));
-        throw e;
+        logE(S(`не сохранено: ${msgOf(e)}`));
+        setStatus(msgOf(e), true);                                  // остаёмся в режиме съёмки
       } finally {
-        if (container) { safe('dispose снимка', () => window.klinecharts.dispose(container)); container.remove(); }
-        busy = false;
+        c.busy = false; el$('#mm-cap-save').disabled = false;
       }
+      if (ok) { exit(false); logI(S('готово, возврат в «Формации»')); if (c.onDone) c.onDone(); }
     }
-    return { build, count, defaultCandles: CANDLES_DEFAULT, maxCandles: PAGE_LIMIT, isBusy: () => busy };
+    return { start, cancel, afterData, load, initDom, isActive: () => !!cap };
   })();
-  window.MarketShot = MarketShot;
+  window.MarketCapture = MarketCapture;
 
   buildView();
+  MarketCapture.initDom();
   bind();
   // для проверки в консоли и тестов
   window.MarketUI = { setView, state: () => ({ sel, sessId, bars: entry ? entry.bars.length : 0, stream: Stream.state }) };

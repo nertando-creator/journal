@@ -1,5 +1,5 @@
 /* app.js — интерфейс. С Supabase общается только через DB (storage.js). */
-const APP_VERSION = 'v5.3';
+const APP_VERSION = 'v5.5';
 const CFG = window.APP_CONFIG;
 let viewMode = 'gallery';                // какое окно открыто: 'gallery' (Формации) или 'market' (График); меняет market.js
 const $ = (s, r = document) => r.querySelector(s);
@@ -918,7 +918,7 @@ function syncFromTitle(id, im) {
   else if (state.modalId === id) renderCoin(im);
 }
 
-/* ---------- «Построить график»: снимок из нашего графика в слот «Основная» ---------- */
+/* ---------- «Сделать скрин»: ручной кадр из окна «График» в слот «Основная» ---------- */
 let shotBusyId = null;                         // id записи, для которой сейчас идёт построение (одно на всё приложение)
 const setShotMsg = (id, text, err) => {
   const im = state.images.find((x) => x.id === id) || findEverywhere(id);
@@ -941,65 +941,54 @@ function buildMissing(im) {
 function renderBuild(im) {
   const btn = $('#m-build'), st = $('#m-build-status');
   if (!btn || !im) return;
-  const on = DB.slotsOn() && !!window.MarketShot;
+  const on = DB.slotsOn() && !!window.MarketCapture;
   $('#m-build-wrap').hidden = !on;
   if (!on) return;
   const miss = buildMissing(im), busy = !!shotBusyId;
-  const cnt = im.range_from && im.range_to ? MarketShot.count(Date.parse(im.range_from), Date.parse(im.range_to), im.timeframe) : null;
   let text = '', err = false, block = miss.length > 0;
   if (miss.length) text = 'Нужны: ' + miss.join(', ');
   else if (im._dateErr) { text = '«От» должно быть раньше «До»'; err = true; block = true; }
-  else if (cnt != null && cnt > MarketShot.maxCandles) { text = `Слишком много свечей: ${cnt}, максимум ${MarketShot.maxCandles}`; err = true; block = true; }
-  else if (busy) text = shotBusyId === im.id ? ((im._shotMsg && im._shotMsg.text) || 'Построение…') : 'Идёт построение другой записи';
+  else if (busy) text = shotBusyId === im.id ? ((im._shotMsg && im._shotMsg.text) || 'Идёт съёмка…') : 'Идёт съёмка другой записи';
   else if (im._shotMsg) { text = im._shotMsg.text; err = im._shotMsg.err; }
-  else text = (slotFilled(im, 'chart') ? 'Основная есть: построение её заменит. ' : '') + (cnt != null ? `Свечей в периоде: ${cnt}` : `Свечей: ${MarketShot.defaultCandles} до «До»`);
+  else text = slotFilled(im, 'chart') ? 'Основная есть: скрин заменит её' : '';
   btn.disabled = busy || block;
-  btn.textContent = busy ? 'идёт построение' : 'Построить график';
+  btn.textContent = busy ? 'идёт съёмка' : 'Сделать скрин';
   st.textContent = text; st.title = text; st.classList.toggle('err', err);
 }
+// «Сделать скрин»: режим съёмки в окне «График» (market.js, MarketCapture). Кадр выбирает пользователь; результат уходит в запись id.
 async function buildChartFor(id) {
   const im0 = findEverywhere(id);
   if (!im0 || shotBusyId || !DB.slotsOn()) return;
-  if (!window.MarketShot) { logE('Построение: market.js не загружен'); toast('Построение недоступно'); return; }
+  if (!window.MarketCapture) { logE('Съёмка: market.js не загружен'); toast('Съёмка недоступна'); return; }
   const symbol = parseTitle(im0.title).symbol, tf = im0.timeframe, endMs = im0.range_to ? Date.parse(im0.range_to) : NaN;
-  const fromMs = im0.range_from ? Date.parse(im0.range_from) : null;
   if (!symbol || !tf || !Number.isFinite(endMs)) { renderBuild(im0); return; }
-  if (fromMs != null) {                                         // те же проверки, что в строке статуса
-    const cnt = MarketShot.count(fromMs, endMs, tf);
-    if (fromMs >= endMs) { setShotMsg(id, '«От» должно быть раньше «До»', true); logE('Построение: «От» должно быть раньше «До»'); return; }
-    if (cnt > MarketShot.maxCandles) { setShotMsg(id, `Слишком много свечей: ${cnt}, максимум ${MarketShot.maxCandles}`, true); logE(`Построение: слишком много свечей: ${cnt}, максимум ${MarketShot.maxCandles}`); return; }
-  }
   const name = im0.title || 'Без названия';
-  if (slotFilled(im0, 'chart')) {
-    const ch = await openDialog({ title: 'Заменить основную картинку?', body: el('p', '', `У записи «${name}» уже есть основная картинка. Новая заменит её, старые файлы будут удалены.`),
-      buttons: [{ id: 'cancel', label: 'Отмена', focus: true }, { id: 'replace', label: 'Заменить', kind: 'danger' }] });
-    if (ch !== 'replace') return;
-  }
-  if (shotBusyId) return;
-  shotBusyId = id; setShotMsg(id, 'Построение…');
-  logI(`Построение: запущено для «${name}» (${symbol} ${tf}, ${fromMs != null ? new Date(fromMs).toISOString() + ' … ' : 'последние ' + MarketShot.defaultCandles + ' до '}${new Date(endMs).toISOString()})`);
-  try {
-    const shot = await MarketShot.build({ symbol, timeframe: tf, fromMs, endMs, onStage: (t) => setShotMsg(id, t) });
-    setShotMsg(id, 'Сохранение…');
-    const file = new File([shot.blob], 'chart.png', { type: 'image/png' });
-    const { preview } = await makePreview(file);
-    logI(`Построение: файл ${(file.size / 1024).toFixed(0)} КБ, превью ${(preview.size / 1024).toFixed(0)} КБ`);
-    const params = { symbol, timeframe: tf, from_ms: fromMs, mode: fromMs != null ? 'range' : 'last' + MarketShot.defaultCandles, end_ms: endMs, end_utc: new Date(endMs).toISOString(), candles: shot.candles, first_ms: shot.firstTs, last_ms: shot.lastTs,
-      width: shot.width, height: shot.height, dpr: shot.dpr, bar_space: shot.barSpace, source: 'binance_usdm', klinecharts: shot.klinecharts || null, built_at: new Date().toISOString() };
-    const t0 = performance.now();
-    const res = await DB.replaceChart(id, file, preview, params);       // результат уходит в запись id, даже если открыта другая
-    logI(`Построение: сохранено в хранилище и базе за ${Math.round(performance.now() - t0)} мс (${res.patch.chart_path})`);
-    if (res.oldFail) logE('Построение: ' + res.oldFail);
-    await applyChartPatch(id, res);
-    setShotMsg(id, `Готово: ${shot.width}×${shot.height}, свечей ${shot.candles}`);
-  } catch (e) {
-    const text = e.code === 'GONE' ? 'Запись удалена, результат отброшен' : errMsg(e);
-    logE(`Построение: ${e.code === 'GONE' ? errMsg(e) : text} («${name}»)`);
-    setShotMsg(id, text, true);
-  } finally {
-    shotBusyId = null;
-    const cur = curImage(); if (cur && isModalOpen()) renderBuild(cur);
-  }
+  shotBusyId = id; im0._shotMsg = null;
+  closeModal();                                                  // дописывает несохранённое и закрывает модалку
+  const started = MarketCapture.start({
+    id, symbol, timeframe: tf, endMs,
+    beforeSave: async () => {                                    // подтверждение спрашиваем при нажатии «Сохранить»
+      const cur = findEverywhere(id);
+      if (!cur || !slotFilled(cur, 'chart')) return true;
+      const ch = await openDialog({ title: 'Заменить основную картинку?', body: el('p', '', `У записи «${name}» уже есть основная картинка. Новая заменит её, старые файлы будут удалены.`),
+        buttons: [{ id: 'cancel', label: 'Отмена', focus: true }, { id: 'replace', label: 'Заменить', kind: 'danger' }] });
+      return ch === 'replace';
+    },
+    onSave: async (shot) => {                                    // любая ошибка здесь оставляет пользователя в режиме съёмки
+      const file = new File([shot.blob], 'chart.png', { type: 'image/png' });
+      const { preview } = await makePreview(file);
+      logI(`Съёмка: файл ${(file.size / 1024).toFixed(0)} КБ, превью ${(preview.size / 1024).toFixed(0)} КБ`);
+      const params = { symbol, timeframe: tf, ...shot.params, width: shot.width, height: shot.height, built_at: new Date().toISOString() };
+      const t0 = performance.now();
+      const res = await DB.replaceChart(id, file, preview, params);     // результат идёт в запись id, даже если в галерее открыто другое
+      logI(`Съёмка: сохранено в хранилище и базе за ${Math.round(performance.now() - t0)} мс (${res.patch.chart_path})`);
+      if (res.oldFail) logE('Съёмка: ' + res.oldFail);
+      await applyChartPatch(id, res);
+    },
+    onDone: () => { shotBusyId = null; setShotMsg(id, 'Готово: основная заменена'); openModal(id); },
+    onCancel: () => { shotBusyId = null; setShotMsg(id, null); }
+  });
+  if (!started) shotBusyId = null;
 }
 // Новая «Основная» применяется ко всем копиям записи (список вкладки и кэш вкладок), карточке, месту и открытой модалке
 async function applyChartPatch(id, res) {

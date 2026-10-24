@@ -26,6 +26,11 @@
   --mod-market-off: #D14343;
   --mod-market-metrics-text: #FFFFFF;
   --mod-market-tool-bg: #1B1B1B;
+  --mod-market-cap-dim: rgba(0, 0, 0, .55);   /* затемнение вне рамки-кадра */
+  --mod-market-cap-line: #E8E8E8;             /* линия рамки-кадра и ручки */
+  --mod-market-cap-handle: 12px;              /* ручки по углам, px */
+  --mod-market-cap-edge: 10px;                /* ширина зоны перетаскивания на границе, px */
+  --mod-market-cap-bar-h: 36px;               /* полоса «Режим съёмки» */
   --mod-market-tool-hover: #2A2A2A;
 
   /* --- Размеры --- */
@@ -103,3 +108,28 @@ body.mod-market-on #stats { display: none; }          /* счётчики гал
 /* курсор над графиком: обычная стрелка (библиотека ставит крестик); «палец» только над кнопками панели */
 .mod-market-chart, .mod-market-chart * { cursor: default !important; }
 .mod-market-tool { cursor: pointer; }
+
+/* ===== режим съёмки: полоса, рамка-кадр, затемнение ===== */
+.mod-market-cap-bar { flex: none; display: flex; align-items: center; gap: 12px; height: var(--mod-market-cap-bar-h); padding: 0 12px; background: var(--bg-search); border-radius: var(--mod-market-radius); font-size: var(--mod-market-fs); }
+.mod-market-cap-title { color: var(--text); }
+.mod-market-cap-status { margin-left: auto; color: var(--text-muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.mod-market-cap-status.err { color: var(--error-text); }
+.mod-market-cap-btn { height: var(--mod-market-btn-h); padding: 0 14px; border-radius: var(--mod-market-radius); background: var(--btn); color: var(--text); }
+.mod-market-cap-btn:hover:not(:disabled) { background: var(--btn-hover); }
+.mod-market-cap-btn:disabled { opacity: .45; cursor: default; }
+.mod-market-cap-on .mod-market-input, .mod-market-cap-on .mod-market-tf:disabled { opacity: .5; cursor: default; }
+.mod-market-cap-layer { position: absolute; inset: 0; z-index: 4; pointer-events: none; overflow: hidden; }
+.mod-market-cap-dim { position: absolute; background: var(--mod-market-cap-dim); pointer-events: none; }
+.mod-market-cap-frame { position: absolute; box-sizing: border-box; border: 1px solid var(--mod-market-cap-line); pointer-events: none; }
+.mod-market-cap-edge { position: absolute; pointer-events: auto; cursor: move; }
+.mod-market-cap-edge[data-edge="top"], .mod-market-cap-edge[data-edge="bottom"] { left: 0; right: 0; height: var(--mod-market-cap-edge); }
+.mod-market-cap-edge[data-edge="top"] { top: calc(var(--mod-market-cap-edge) / -2); }
+.mod-market-cap-edge[data-edge="bottom"] { bottom: calc(var(--mod-market-cap-edge) / -2); }
+.mod-market-cap-edge[data-edge="left"], .mod-market-cap-edge[data-edge="right"] { top: 0; bottom: 0; width: var(--mod-market-cap-edge); }
+.mod-market-cap-edge[data-edge="left"] { left: calc(var(--mod-market-cap-edge) / -2); }
+.mod-market-cap-edge[data-edge="right"] { right: calc(var(--mod-market-cap-edge) / -2); }
+.mod-market-cap-h { position: absolute; width: var(--mod-market-cap-handle); height: var(--mod-market-cap-handle); background: var(--mod-market-cap-line); pointer-events: auto; }
+.mod-market-cap-h[data-corner="nw"] { left: calc(var(--mod-market-cap-handle) / -2); top: calc(var(--mod-market-cap-handle) / -2); cursor: nwse-resize; }
+.mod-market-cap-h[data-corner="ne"] { right: calc(var(--mod-market-cap-handle) / -2); top: calc(var(--mod-market-cap-handle) / -2); cursor: nesw-resize; }
+.mod-market-cap-h[data-corner="sw"] { left: calc(var(--mod-market-cap-handle) / -2); bottom: calc(var(--mod-market-cap-handle) / -2); cursor: nesw-resize; }
+.mod-market-cap-h[data-corner="se"] { right: calc(var(--mod-market-cap-handle) / -2); bottom: calc(var(--mod-market-cap-handle) / -2); cursor: nwse-resize; }
