@@ -1,5 +1,6 @@
 /* app.js — интерфейс. С Supabase общается только через DB (storage.js). */
-const APP_VERSION = 'v5.5';
+const APP_VERSION = 'v5.6';
+const CAL_PREFILL = true;   // календарь открывается на дате «До» записи (или сегодня); false: открывать пустым (если выбор уже подсвеченного дня не даёт события change)
 const CFG = window.APP_CONFIG;
 let viewMode = 'gallery';                // какое окно открыто: 'gallery' (Формации) или 'market' (График); меняет market.js
 const $ = (s, r = document) => r.querySelector(s);
@@ -683,8 +684,6 @@ function refreshSaveUI() {
   $('#status-select').classList.toggle('save-error', bad('status'));
   $('#folder-select').classList.toggle('save-error', bad('folder_id'));
   $('#m-comment').classList.toggle('save-error', bad('comment'));
-  $('#m-date').classList.toggle('save-error', bad('range_to'));
-  $('#m-from').classList.toggle('save-error', bad('range_from'));
   $('#tf-select').classList.toggle('save-error', bad('timeframe'));
   const k = saveKey(id, 'comment'), st = $('#comment-state');
   let text = '', err = false;
@@ -854,22 +853,22 @@ function fillPanel(im) {
 }
 /* ---------- Дата, ТФ, монета ---------- */
 const pad2 = (n) => String(n).padStart(2, '0');
-function isoToLocalInput(iso) {              // UTC из базы → местное время браузера для datetime-local
-  if (!iso) return '';
-  const d = new Date(iso); if (isNaN(d)) return '';
-  return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}T${pad2(d.getHours())}:${pad2(d.getMinutes())}`;
-}
-function localInputToIso(v) {                // местное время из поля → UTC для базы
-  if (!v) return null;
-  const d = new Date(v); return isNaN(d) ? null : d.toISOString();
+const fmtLocal = (iso) => { const d = new Date(iso); return isNaN(d) ? '' : `${pad2(d.getDate())}.${pad2(d.getMonth() + 1)}.${d.getFullYear()} ${pad2(d.getHours())}:${pad2(d.getMinutes())}`; };   // местное время браузера
+const dayStr = (d) => `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`;
+function renderRange(im) {                    // неизменяемый текст сохранённого диапазона (поля ввода больше нет)
+  const t = $('#m-range'); if (!t) return;
+  const f = im.range_from ? fmtLocal(im.range_from) : '', to = im.range_to ? fmtLocal(im.range_to) : '';
+  let text = 'Даты нет', empty = true;
+  if (f && to) { text = `${f} — ${to}`; empty = false; }
+  else if (to) { text = `до ${to}`; empty = false; }
+  else if (f) { text = `от ${f}`; empty = false; }
+  t.textContent = text; t.title = empty ? '' : text; t.classList.toggle('empty', empty);
 }
 function renderMeta(im) {
   const on = DB.slotsOn();
   $('#m-meta').hidden = !on;
   if (!on) return;
-  $('#m-date').value = isoToLocalInput(im.range_to);
-  $('#m-from').value = isoToLocalInput(im.range_from);
-  im._dateErr = null; $('#m-date').classList.remove('invalid'); $('#m-from').classList.remove('invalid');
+  renderRange(im);
   const v = $('#tf-select .sel-val'); v.textContent = '';
   if (im.timeframe) v.appendChild(chipEl(im.timeframe)); else v.appendChild(el('span', 'dash', '—'));
   renderCoin(im);
@@ -893,21 +892,6 @@ function setTimeframe(v) {
   if (!im || (im.timeframe || null) === v) return;
   im.timeframe = v; renderMeta(im);
   queueSave(id, 'timeframe', v);
-}
-// «От» и «До» (range_from / range_to): «От» должно быть раньше «До», иначе не сохраняем, подсвечиваем и пишем причину рядом с кнопкой
-function setDateField(field, iso) {
-  const id = state.modalId, im = curImage();
-  if (!im) return;
-  const inp = $(field === 'range_to' ? '#m-date' : '#m-from');
-  const from = field === 'range_from' ? iso : im.range_from, to = field === 'range_to' ? iso : im.range_to;
-  if (from && to && Date.parse(from) >= Date.parse(to)) {
-    inp.classList.add('invalid'); im._dateErr = field;
-    logW(`Дата не сохранена: «От» (${from}) должно быть раньше «До» (${to}) («${im.title || 'Без названия'}»)`);
-    renderBuild(im); return;
-  }
-  inp.classList.remove('invalid'); if (im._dateErr === field) im._dateErr = null;
-  if ((im[field] || null) !== iso) { im[field] = iso; queueSave(id, field, iso); im._shotMsg = null; }   // прежний результат построения к новому периоду не относится
-  renderBuild(im);
 }
 // Название изменилось: пересчитать монету (symbol в базе) и, если ТФ пуст, подставить его из названия (выбранный вручную не трогаем)
 function syncFromTitle(id, im) {
@@ -935,7 +919,6 @@ function buildMissing(im) {
   const miss = [];
   if (!parseTitle(im.title).symbol) miss.push('монета в названии');
   if (!im.timeframe) miss.push('ТФ');
-  if (!im.range_to) miss.push('дата «До»');
   return miss;
 }
 function renderBuild(im) {
@@ -947,26 +930,55 @@ function renderBuild(im) {
   const miss = buildMissing(im), busy = !!shotBusyId;
   let text = '', err = false, block = miss.length > 0;
   if (miss.length) text = 'Нужны: ' + miss.join(', ');
-  else if (im._dateErr) { text = '«От» должно быть раньше «До»'; err = true; block = true; }
   else if (busy) text = shotBusyId === im.id ? ((im._shotMsg && im._shotMsg.text) || 'Идёт съёмка…') : 'Идёт съёмка другой записи';
   else if (im._shotMsg) { text = im._shotMsg.text; err = im._shotMsg.err; }
   else text = slotFilled(im, 'chart') ? 'Основная есть: скрин заменит её' : '';
   btn.disabled = busy || block;
-  btn.textContent = busy ? 'идёт съёмка' : 'Сделать скрин';
+  btn.title = busy ? 'Идёт съёмка' : 'Выбрать день и сделать скрин';
   st.textContent = text; st.title = text; st.classList.toggle('err', err);
 }
-// «Сделать скрин»: режим съёмки в окне «График» (market.js, MarketCapture). Кадр выбирает пользователь; результат уходит в запись id.
-async function buildChartFor(id) {
+// Кнопка-календарь: нативный выбор дня (скрытый input type=date + showPicker); после выбора дня стартует режим съёмки
+function openCalendar() {
+  const im = curImage(), inp = $('#m-cal');
+  if (!im || shotBusyId || $('#m-build').disabled) return;
+  const today = dayStr(new Date());
+  inp.max = today; inp.dataset.id = im.id;
+  inp.value = CAL_PREFILL ? (im.range_to ? dayStr(new Date(im.range_to)) : today) : '';
+  try {
+    if (typeof inp.showPicker !== 'function') throw new Error('showPicker недоступен в этом браузере');
+    inp.showPicker();
+    logI(`Съёмка: календарь открыт («${im.title || 'Без названия'}»), день по умолчанию ${inp.value || 'не задан'}`);
+  } catch (e) { logW('Съёмка: календарь не открылся: ' + errMsg(e)); toast('Календарь не открылся'); }
+}
+function onCalendarPicked() {
+  const inp = $('#m-cal'), v = inp.value, id = inp.dataset.id || state.modalId;
+  if (!v) return;                                              // пустой выбор / отмена: ничего не запускаем
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(v);
+  if (!m) { logW('Съёмка: календарь вернул непонятную дату: ' + v); return; }
+  if (v > dayStr(new Date())) { logW('Съёмка: выбран день в будущем (' + v + '), не запускаю'); toast('Будущие дни недоступны'); return; }
+  const endMs = new Date(+m[1], +m[2] - 1, +m[3], 23, 59, 59, 999).getTime();   // конец выбранного дня по местному времени, в UTC мс
+  buildChartFor(id, { endMs, pickedDay: v });
+}
+// Режим съёмки в окне «График» (market.js, MarketCapture). Кадр и линию обрезки выбирает пользователь; результат уходит в запись id.
+async function buildChartFor(id, pick) {
   const im0 = findEverywhere(id);
-  if (!im0 || shotBusyId || !DB.slotsOn()) return;
+  if (!im0 || shotBusyId || !DB.slotsOn() || !pick) return;
   if (!window.MarketCapture) { logE('Съёмка: market.js не загружен'); toast('Съёмка недоступна'); return; }
-  const symbol = parseTitle(im0.title).symbol, tf = im0.timeframe, endMs = im0.range_to ? Date.parse(im0.range_to) : NaN;
+  const symbol = parseTitle(im0.title).symbol, tf = im0.timeframe, endMs = pick.endMs;
   if (!symbol || !tf || !Number.isFinite(endMs)) { renderBuild(im0); return; }
   const name = im0.title || 'Без названия';
   shotBusyId = id; im0._shotMsg = null;
+  logI(`Съёмка: выбран день ${pick.pickedDay}, конец дня ${new Date(endMs).toISOString()} (UTC), местный часовой пояс UTC${-new Date(endMs).getTimezoneOffset() / 60 >= 0 ? '+' : ''}${-new Date(endMs).getTimezoneOffset() / 60}`);
+  // превью оригинала для колонки слева в режиме съёмки (ориентир); нет ссылки или не загрузилось: колонки не будет, на съёмку это не влияет
+  let previewUrl = null;
+  if (im0.preview_path) {
+    try { await ensureUrls([im0.preview_path]); const c = urlCache.get(im0.preview_path); previewUrl = c ? c.url : null; }
+    catch (e) { logW('Съёмка: ссылка на превью оригинала не получена: ' + errMsg(e)); }
+  }
+  if (!previewUrl) logW('Съёмка: у записи нет ссылки на превью оригинала, колонка слева не показывается');
   closeModal();                                                  // дописывает несохранённое и закрывает модалку
   const started = MarketCapture.start({
-    id, symbol, timeframe: tf, endMs,
+    id, symbol, timeframe: tf, endMs, pickedDay: pick.pickedDay, previewUrl,
     beforeSave: async () => {                                    // подтверждение спрашиваем при нажатии «Сохранить»
       const cur = findEverywhere(id);
       if (!cur || !slotFilled(cur, 'chart')) return true;
@@ -980,7 +992,8 @@ async function buildChartFor(id) {
       logI(`Съёмка: файл ${(file.size / 1024).toFixed(0)} КБ, превью ${(preview.size / 1024).toFixed(0)} КБ`);
       const params = { symbol, timeframe: tf, ...shot.params, width: shot.width, height: shot.height, built_at: new Date().toISOString() };
       const t0 = performance.now();
-      const res = await DB.replaceChart(id, file, preview, params);     // результат идёт в запись id, даже если в галерее открыто другое
+      logI(`Съёмка: диапазон в запись: От ${shot.range.from}, До ${shot.range.to} (UTC)`);
+      const res = await DB.replaceChart(id, file, preview, params, shot.range);   // картинка и диапазон одним обновлением строки; результат идёт в запись id
       logI(`Съёмка: сохранено в хранилище и базе за ${Math.round(performance.now() - t0)} мс (${res.patch.chart_path})`);
       if (res.oldFail) logE('Съёмка: ' + res.oldFail);
       await applyChartPatch(id, res);
@@ -1001,7 +1014,7 @@ async function applyChartPatch(id, res) {
   addUsage({ chart_size: patch.chart_size }, 1);
   const im = state.images.find((x) => x.id === id), old = $(`.card[data-id="${id}"]`);
   if (im && old) old.replaceWith(imageCard(im));                          // вместо «Нет графика» появляется картинка
-  if (im && state.modalId === id) showSlot(im, 'chart');                  // «Основная» становится большой
+  if (im && state.modalId === id) { showSlot(im, 'chart'); renderRange(im); }   // «Основная» становится большой, текст диапазона обновляется
 }
 
 /* ---------- колонка миниатюр слева: два слота, которые сейчас не большие (порядок Основная, Оригинал, Запасная) ---------- */
@@ -1302,13 +1315,8 @@ function bindPanel() {
   $('#status-host').addEventListener('click', (e) => { if (!inMenu(e)) toggleMenu('status', $('#status-host'), renderStatusMenu, 'match'); });
   $('#folder-host').addEventListener('click', (e) => { if (!inMenu(e)) toggleMenu('folder', $('#folder-host'), renderFolderMenu, 'match right'); });
   $('#tf-host').addEventListener('click', (e) => { if (!inMenu(e)) toggleMenu('tf', $('#tf-host'), renderTfMenu, 'match'); });
-  const dateEl = $('#m-date');
-  const fromEl = $('#m-from');
-  dateEl.addEventListener('change', () => setDateField('range_to', localInputToIso(dateEl.value)));       // сегменты ДД, ММ, ГГГГ, ЧЧ, мин вводятся с клавиатуры
-  fromEl.addEventListener('change', () => setDateField('range_from', localInputToIso(fromEl.value)));
-  $('#m-date-clear').addEventListener('click', () => { dateEl.value = ''; setDateField('range_to', null); });
-  $('#m-from-clear').addEventListener('click', () => { fromEl.value = ''; setDateField('range_from', null); });
-  $('#m-build').addEventListener('click', () => buildChartFor(state.modalId));
+  $('#m-cal').addEventListener('change', onCalendarPicked);
+  $('#m-build').addEventListener('click', openCalendar);
   const c = $('#m-comment');
   c.addEventListener('input', () => {
     const id = state.modalId, im = curImage(); if (!im) return;

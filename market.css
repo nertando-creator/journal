@@ -31,6 +31,11 @@
   --mod-market-cap-handle: 12px;              /* ручки по углам, px */
   --mod-market-cap-edge: 10px;                /* ширина зоны перетаскивания на границе, px */
   --mod-market-cap-bar-h: 36px;               /* полоса «Режим съёмки» */
+  --mod-market-cap-cut-dim: 0.7;              /* затемнение правее линии обрезки (0..1, цвет фона графика) */
+  --mod-market-cap-cut-line: #F2B84B;         /* линия обрезки */
+  --mod-market-cap-cut-w: 2px;                /* толщина линии обрезки */
+  --mod-market-cap-cut-grab: 10px;            /* ширина полосы захвата линии */
+  --mod-market-cap-preview-w: 300px;          /* колонка превью «Оригинал» слева от графика */
   --mod-market-tool-hover: #2A2A2A;
 
   /* --- Размеры --- */
@@ -133,3 +138,15 @@ body.mod-market-on #stats { display: none; }          /* счётчики гал
 .mod-market-cap-h[data-corner="ne"] { right: calc(var(--mod-market-cap-handle) / -2); top: calc(var(--mod-market-cap-handle) / -2); cursor: nesw-resize; }
 .mod-market-cap-h[data-corner="sw"] { left: calc(var(--mod-market-cap-handle) / -2); bottom: calc(var(--mod-market-cap-handle) / -2); cursor: nesw-resize; }
 .mod-market-cap-h[data-corner="se"] { right: calc(var(--mod-market-cap-handle) / -2); bottom: calc(var(--mod-market-cap-handle) / -2); cursor: nwse-resize; }
+
+/* линия обрезки справа (внутри рамки-кадра); затемнение пропускает события к графику */
+.mod-market-cap-cutdim { position: absolute; top: 0; bottom: 0; background: color-mix(in srgb, var(--mod-market-bg) calc(var(--mod-market-cap-cut-dim) * 100%), transparent); pointer-events: none; }
+.mod-market-cap-cut { position: absolute; top: 0; bottom: 0; width: var(--mod-market-cap-cut-grab); margin-left: calc(var(--mod-market-cap-cut-grab) / -2); pointer-events: auto; cursor: ew-resize !important; touch-action: none; }
+.mod-market-cap-cut-line { position: absolute; top: 0; bottom: 0; left: 50%; width: var(--mod-market-cap-cut-w); margin-left: calc(var(--mod-market-cap-cut-w) / -2); background: var(--mod-market-cap-cut-line); pointer-events: none; }
+
+/* колонка превью оригинала слева от графика (только в режиме съёмки; ориентир, клик ничего не делает) */
+.mod-market-cap-prev { width: var(--mod-market-cap-preview-w); flex: none; display: flex; flex-direction: column; gap: 6px; min-height: 0; }
+.mod-market-cap-prev[hidden] { display: none; }
+.mod-market-cap-prev-label { flex: none; font-size: var(--fs-label); line-height: var(--label-h); color: var(--text-muted); }
+.mod-market-cap-prev-box { flex: 1; min-height: 0; display: flex; align-items: flex-start; justify-content: center; }
+.mod-market-cap-prev-box img { max-width: 100%; max-height: 100%; object-fit: contain; object-position: center top; pointer-events: none; user-select: none; border-radius: var(--r-card); }

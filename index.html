@@ -93,22 +93,6 @@
         </div>
       </div>
       <div id="m-meta" class="m-meta" hidden>
-        <div class="m-meta-row m-meta-dates">
-          <div class="m-sel-cell">
-            <div class="m-label">От</div>
-            <div class="m-date-wrap">
-              <input id="m-from" class="m-date" type="datetime-local" autocomplete="off">
-              <button type="button" id="m-from-clear" class="m-date-clear" title="Очистить «От»" aria-label="Очистить «От»"><svg viewBox="0 0 10 10" width="8" height="8"><path d="M1 1l8 8M9 1l-8 8" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg></button>
-            </div>
-          </div>
-          <div class="m-sel-cell">
-            <div class="m-label">До</div>
-            <div class="m-date-wrap">
-              <input id="m-date" class="m-date" type="datetime-local" autocomplete="off">
-              <button type="button" id="m-date-clear" class="m-date-clear" title="Очистить «До»" aria-label="Очистить «До»"><svg viewBox="0 0 10 10" width="8" height="8"><path d="M1 1l8 8M9 1l-8 8" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg></button>
-            </div>
-          </div>
-        </div>
         <div class="m-meta-row m-meta-tf">
           <div class="m-sel-cell">
             <div class="m-label">ТФ</div>
@@ -119,7 +103,13 @@
           <div id="m-coin" class="m-coin"></div>
         </div>
         <div id="m-build-wrap" class="m-build" hidden>
-          <button type="button" id="m-build" class="m-build-btn" disabled>Сделать скрин</button>
+          <div class="m-range-row">
+            <button type="button" id="m-build" class="m-cal-btn" title="Выбрать день и сделать скрин" aria-label="Календарь: выбрать день для скрина" disabled>
+              <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="3.5" y="5" width="17" height="15.5" rx="2"/><path d="M3.5 10h17M8 3v4M16 3v4"/></svg>
+            </button>
+            <div id="m-range" class="m-range empty">Даты нет</div>
+            <input id="m-cal" class="m-cal-input" type="date" tabindex="-1" aria-hidden="true">
+          </div>
           <div id="m-build-status" class="m-build-status"></div>
         </div>
       </div>

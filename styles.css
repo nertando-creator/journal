@@ -85,8 +85,9 @@
   --card-star: 14px;             /* звезда избранного на карточке */
   --card-star-pad: 8px;
   --fs-empty: 12px;
-  --build-h: 30px;               /* кнопка «Построить график» */
-  --build-gap: 8px;
+  --cal-btn-w: 40px;             /* кнопка-календарь (высота = --select-h) */
+  --cal-gap: 8px;                /* между кнопкой и текстом диапазона */
+  --cal-input-size: 1px;         /* скрытый input type=date: 1 px, прозрачный, но отрисован (нужно для showPicker) */
   --meta-row-gap: 10px;          /* между рядом «От/До» и рядом «ТФ/Монета» */
   --card-border: rgba(232, 232, 232, .26);   /* постоянная рамка карточки с картинкой */
   --card-border-w: 1px;
@@ -315,14 +316,7 @@ body.dragging-tab, body.dragging-tab * { cursor: grabbing; user-select: none; }
 /* ===== v4.5/v4.6: Дата, ТФ, монета, слоты картинок, развёрнутый вид ===== */
 .m-meta { flex: none; }
 .m-meta-row { display: grid; column-gap: var(--select-gap); }
-.m-meta-dates { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
-.m-meta-tf { grid-template-columns: var(--status-w) minmax(0, 1fr); margin-top: var(--meta-row-gap); align-items: end; }
-.m-date-wrap { position: relative; }
-.m-date { width: 100%; min-width: 0; height: var(--select-h); padding: 0 24px 0 8px; color-scheme: dark; background: var(--bg-select); border: 0; border-radius: var(--r-field); color: var(--text); font: inherit; font-size: var(--fs-date); outline: none; }
-.m-date::-webkit-calendar-picker-indicator { display: none; }                 /* без значка и выпадающего календаря; сегменты вводятся с клавиатуры */
-.m-date.save-error, .m-date.invalid { box-shadow: 0 0 0 1px var(--error-line); }
-.m-date-clear { position: absolute; right: 5px; top: 50%; transform: translateY(-50%); width: 16px; height: 16px; display: grid; place-items: center; color: var(--tri); }
-.m-date-clear:hover { color: var(--tri-hover); }
+.m-meta-tf { grid-template-columns: var(--status-w) minmax(0, 1fr); align-items: end; }
 .m-coin { height: var(--select-h); display: flex; align-items: center; min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; font-size: var(--fs-label); color: var(--text-muted); }
 #tf-select.save-error { box-shadow: 0 0 0 1px var(--error-line); }
 
@@ -361,11 +355,15 @@ body.dragging-tab, body.dragging-tab * { cursor: grabbing; user-select: none; }
 #z-img.ready { opacity: 1; }
 
 /* кнопка «Построить график» */
-.m-build { margin-top: var(--build-gap); }
-.m-build-btn { width: 100%; height: var(--build-h); border-radius: var(--r-field); background: var(--btn); color: var(--text); font-size: var(--fs-date); }
-.m-build-btn:hover:not(:disabled) { background: var(--btn-hover); }
-.m-build-btn:disabled { opacity: .45; cursor: default; }
-.m-build-status { margin-top: var(--meta-gap); font-size: var(--fs-label); line-height: var(--label-h); color: var(--text-muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.m-build { margin-top: var(--meta-row-gap); }
+.m-range-row { position: relative; display: grid; grid-template-columns: var(--cal-btn-w) minmax(0, 1fr); column-gap: var(--cal-gap); align-items: center; }
+.m-cal-btn { width: var(--cal-btn-w); height: var(--select-h); display: grid; place-items: center; border-radius: var(--r-field); background: var(--btn); color: var(--text); }
+.m-cal-btn:hover:not(:disabled) { background: var(--btn-hover); }
+.m-cal-btn:disabled { opacity: .45; cursor: default; }
+.m-range { min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; font-size: var(--fs-date); color: var(--text); user-select: none; cursor: default; }
+.m-range.empty { color: var(--text-muted); }
+.m-cal-input { position: absolute; left: 0; bottom: 0; width: var(--cal-input-size); height: var(--cal-input-size); opacity: 0; pointer-events: none; border: 0; padding: 0; color-scheme: dark; }
+.m-build-status { min-height: var(--label-h); margin-top: var(--meta-gap); font-size: var(--fs-label); line-height: var(--label-h); color: var(--text-muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .m-build-status.err { color: var(--error-text); }
 
 /* карточки с основной картинкой: постоянная тонкая светлая рамка и чуть больше скругление; при наведении рамка как раньше */

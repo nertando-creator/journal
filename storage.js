@@ -246,7 +246,7 @@
     },
     // Замена «Основной» (построение графика): новые файлы с новыми именами → строка → и только потом удаление старых файлов.
     // Результат относится к записи id, а не к открытой сейчас. Если записи уже нет, новые файлы удаляются (ошибка с code 'GONE').
-    async replaceChart(imageId, file, previewBlob, params) {
+    async replaceChart(imageId, file, previewBlob, params, range) {   // range (необязательно): { from, to } в ISO, пишется в той же строке, что и картинка
       const { data: { session } } = await sb.auth.getSession();
       if (!session) fail('Нет сессии', 'войди заново');
       const cur = await attemptNet('чтение записи', () => sb.from('images').select('id,chart_path,chart_preview_path,chart_size').eq('id', imageId).maybeSingle());
@@ -263,6 +263,7 @@
           uploaded.push(path);
         }
         const patch = { chart_path: fullPath, chart_preview_path: prevPath, chart_size: file.size, chart_params: params };
+        if (range) { patch.range_from = range.from || null; patch.range_to = range.to || null; }   // одним обновлением с картинкой
         const r = await attemptNet('запись в базу', () => sb.from('images').update(patch).eq('id', imageId).select('id'));
         if (r.error) fail('База: запись основной картинки', r.error);
         if (!r.data || !r.data.length) throw Object.assign(new Error('Запись удалена во время построения, новые файлы удалены'), { code: 'GONE' });
