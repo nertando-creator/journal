@@ -32,16 +32,17 @@
   --mod-market-cap-edge: 10px;                /* ширина зоны перетаскивания на границе, px */
   --mod-market-cap-bar-h: 36px;               /* полоса «Режим съёмки» */
   --mod-market-cap-cut-dim: 0.7;              /* затемнение правее линии обрезки (0..1, цвет фона графика) */
-  --mod-market-cap-cut-line: #F2B84B;         /* линия обрезки */
-  --mod-market-cap-cut-w: 2px;                /* толщина линии обрезки */
+  --mod-market-cap-cut-line: #D8D8D8;         /* линия обрезки (монохромная; временно) */
+  --mod-market-cap-cut-w: 1px;                /* толщина линии обрезки */
   --mod-market-cap-cut-grab: 10px;            /* ширина полосы захвата линии */
-  --mod-market-cap-preview-w: 300px;          /* колонка превью «Оригинал» слева от графика */
+  --mod-market-cap-preview-w: 260px;          /* окошко «Оригинал» в левом нижнем углу графика */
+  --mod-market-cap-preview-gap: 12px;         /* его отступ от левого края и от нижней границы панели свечей */
+  --mod-market-cap-preview-line: #3a3a3a;     /* тонкая рамка окошка */
   --mod-market-tool-hover: #2A2A2A;
 
   /* --- Размеры --- */
   --mod-market-page-top: 24px;           /* = верхний отступ .page в styles.css */
-  --mod-market-switch-h: 36px;
-  --mod-market-switch-gap: 16px;         /* переключатель → содержимое */
+  /* высота верхней панели берётся из --topnav-h (styles.css) */
   --mod-market-bottom-reserve: 48px;     /* место под нижнюю панель «Логи» */
   --mod-market-top-h: 36px;
   --mod-market-top-gap: 10px;
@@ -58,20 +59,14 @@
   --mod-market-radius: 6px;
 }
 
-/* ===== переключатель окон ===== */
-.mod-market-switch { display: inline-flex; height: var(--mod-market-switch-h); margin-bottom: var(--mod-market-switch-gap); border-radius: 999px; background: var(--bg-search); padding: 3px; gap: 2px; }
-.mod-market-switch-btn { padding: 0 20px; border-radius: 999px; font-size: var(--fs-tab); color: var(--text-muted); }
-.mod-market-switch-btn:hover { color: var(--text); }
-.mod-market-switch-btn.active { background: var(--btn); color: var(--text); }
-
 /* ===== режим «График»: подстройка общей страницы ===== */
 body.mod-market-on .page { padding-bottom: 0; }
 body.mod-market-on #stats { display: none; }          /* счётчики галереи */
 
 /* ===== окно ===== */
 .mod-market-view { display: flex; flex-direction: column; gap: var(--mod-market-top-gap);
-  height: calc(100vh - var(--mod-market-page-top) - var(--mod-market-switch-h) - var(--mod-market-switch-gap) - var(--mod-market-bottom-reserve));
-  height: calc(100dvh - var(--mod-market-page-top) - var(--mod-market-switch-h) - var(--mod-market-switch-gap) - var(--mod-market-bottom-reserve));
+  height: calc(100vh - var(--topnav-h) - var(--mod-market-page-top) - var(--mod-market-bottom-reserve));
+  height: calc(100dvh - var(--topnav-h) - var(--mod-market-page-top) - var(--mod-market-bottom-reserve));
   min-height: 320px; }
 
 .mod-market-top { display: flex; align-items: center; gap: 14px; height: var(--mod-market-top-h); flex: none; }
@@ -144,9 +139,8 @@ body.mod-market-on #stats { display: none; }          /* счётчики гал
 .mod-market-cap-cut { position: absolute; top: 0; bottom: 0; width: var(--mod-market-cap-cut-grab); margin-left: calc(var(--mod-market-cap-cut-grab) / -2); pointer-events: auto; cursor: ew-resize !important; touch-action: none; }
 .mod-market-cap-cut-line { position: absolute; top: 0; bottom: 0; left: 50%; width: var(--mod-market-cap-cut-w); margin-left: calc(var(--mod-market-cap-cut-w) / -2); background: var(--mod-market-cap-cut-line); pointer-events: none; }
 
-/* колонка превью оригинала слева от графика (только в режиме съёмки; ориентир, клик ничего не делает) */
-.mod-market-cap-prev { width: var(--mod-market-cap-preview-w); flex: none; display: flex; flex-direction: column; gap: 6px; min-height: 0; }
+/* окошко превью «Оригинал» в левом нижнем углу графика: поверх графика, клики и колесо проходят сквозь */
+.mod-market-cap-prev { position: absolute; left: var(--mod-market-cap-preview-gap); bottom: var(--mod-market-cap-preview-gap); z-index: 6; width: var(--mod-market-cap-preview-w); display: flex; flex-direction: column; gap: 4px; padding: 4px; box-sizing: border-box; background: var(--mod-market-bg); border: 1px solid var(--mod-market-cap-preview-line); border-radius: var(--mod-market-radius); pointer-events: none; user-select: none; }
 .mod-market-cap-prev[hidden] { display: none; }
-.mod-market-cap-prev-label { flex: none; font-size: var(--fs-label); line-height: var(--label-h); color: var(--text-muted); }
-.mod-market-cap-prev-box { flex: 1; min-height: 0; display: flex; align-items: flex-start; justify-content: center; }
-.mod-market-cap-prev-box img { max-width: 100%; max-height: 100%; object-fit: contain; object-position: center top; pointer-events: none; user-select: none; border-radius: var(--r-card); }
+.mod-market-cap-prev-label { font-size: var(--fs-chip); line-height: 1.2; color: var(--text-muted); }
+.mod-market-cap-prev img { display: block; width: 100%; height: auto; max-height: 100%; object-fit: contain; pointer-events: none; }

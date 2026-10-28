@@ -1,7 +1,22 @@
 /* styles.css — все цвета и размеры в переменных ниже */
 :root {
   /* --- Цвета --- */
-  --bg-page: #101216;
+  --bg-page: #121212;                /* v5.7: по палитре владельца (временно, скриншот не приложен) */
+  /* верхняя панель (v5.7; значения временные, скриншот палитры не приложен) */
+  --topnav-h: 54px;
+  --topnav-bg: #474747;
+  --topnav-line: #474747;            /* граница снизу, 1 px внутри панели */
+  --topnav-divider: #6A6A6A;         /* перегородка между «Формации» и «График» */
+  --topnav-divider-h: 16px;
+  --topnav-text: #D8D8D8;
+  --topnav-active-bg: #121212;       /* фон выбранного пункта */
+  --topnav-hover-bg: rgba(255, 255, 255, .07);
+  --topnav-r: 4px;
+  --topnav-gear: 30px;               /* кнопка-шестерёнка 30×30 */
+  --topnav-pad-x: 14px;              /* внутренний отступ пункта по горизонтали */
+  --topnav-item-h: 30px;
+  --topnav-side-pad: 16px;           /* отступ шестерёнки от правого края окна */
+  --fs-topnav: 13px;
   --bg-search: #303030;
   --bg-panel: #1D1D1D;           /* подложка сетки и выбранная вкладка */
   --bg-modal: #141414;
@@ -151,6 +166,19 @@ input { font: inherit; color: inherit; }
 
 /* ===== ГЛАВНОЕ ОКНО ===== */
 .page { width: min(var(--page-w), calc(100% - 2 * var(--page-side))); margin: 0 auto; padding: 24px 0 80px; }
+
+/* ===== верхняя панель (v5.7): на всю ширину окна, по центру «Формации | График», справа шестерёнка (макет) ===== */
+.topnav { box-sizing: border-box; height: var(--topnav-h); display: grid; grid-template-columns: 1fr auto 1fr; align-items: center; background: var(--topnav-bg); border-bottom: 1px solid var(--topnav-line); }
+.topnav[hidden] { display: none; }
+.topnav-center { display: flex; align-items: center; gap: 6px; }
+.topnav-item { height: var(--topnav-item-h); padding: 0 var(--topnav-pad-x); border-radius: var(--topnav-r); font-size: var(--fs-topnav); font-weight: 500; color: var(--topnav-text); }
+.topnav-item:hover { background: var(--topnav-hover-bg); }
+.topnav-item.active { background: var(--topnav-active-bg); }
+.topnav-divider { width: 1px; height: var(--topnav-divider-h); background: var(--topnav-divider); }
+.topnav-side { display: flex; align-items: center; }
+.topnav-right { justify-content: flex-end; padding-right: var(--topnav-side-pad); }
+.topnav-gear { width: var(--topnav-gear); height: var(--topnav-gear); display: grid; place-items: center; border-radius: var(--topnav-r); background: var(--topnav-bg); color: var(--topnav-text); }
+.topnav-gear:hover { background: var(--topnav-hover-bg); }
 .search { height: var(--search-h); border-radius: 999px; background: var(--bg-search); margin-bottom: var(--search-gap); }
 
 /* --- вкладки --- */

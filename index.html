@@ -23,12 +23,23 @@
   </form>
 </section>
 
+<!-- ===== ВЕРХНЯЯ ПАНЕЛЬ (показывается вместе с #app; market.js синхронизирует hidden) ===== -->
+<header id="topnav" class="topnav" hidden>
+  <span class="topnav-side"></span>
+  <nav class="topnav-center" aria-label="Окна">
+    <button type="button" id="mm-tab-gallery" class="topnav-item active">Формации</button>
+    <i class="topnav-divider" aria-hidden="true"></i>
+    <button type="button" id="mm-tab-market" class="topnav-item">График</button>
+  </nav>
+  <span class="topnav-side topnav-right">
+    <button type="button" id="topnav-gear" class="topnav-gear" title="Настройки (скоро)" aria-label="Настройки (скоро)">
+      <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg>
+    </button>
+  </span>
+</header>
+
 <!-- ===== ГЛАВНОЕ ОКНО ===== -->
 <main id="app" class="page" hidden>
-  <nav class="mod-market-switch" aria-label="Окна">
-    <button type="button" id="mm-tab-gallery" class="mod-market-switch-btn active">Формации</button>
-    <button type="button" id="mm-tab-market" class="mod-market-switch-btn">График</button>
-  </nav>
   <div id="view-gallery">
     <div class="search"></div>
     <div class="tabs-row">

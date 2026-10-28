@@ -1,5 +1,5 @@
 /* app.js — интерфейс. С Supabase общается только через DB (storage.js). */
-const APP_VERSION = 'v5.6';
+const APP_VERSION = 'v5.7';
 const CAL_PREFILL = true;   // календарь открывается на дате «До» записи (или сегодня); false: открывать пустым (если выбор уже подсвеченного дня не даёт события change)
 const CFG = window.APP_CONFIG;
 let viewMode = 'gallery';                // какое окно открыто: 'gallery' (Формации) или 'market' (График); меняет market.js
