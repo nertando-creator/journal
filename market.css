@@ -144,3 +144,6 @@ body.mod-market-on #stats { display: none; }          /* счётчики гал
 .mod-market-cap-prev[hidden] { display: none; }
 .mod-market-cap-prev-label { font-size: var(--fs-chip); line-height: 1.2; color: var(--text-muted); }
 .mod-market-cap-prev img { display: block; width: 100%; height: auto; max-height: 100%; object-fit: contain; pointer-events: none; }
+
+/* «обрезано» (Enter / двойной клик по линии): правее линии фон графика полностью закрывает его */
+.mod-market-cap-cutdim.on { background: var(--mod-market-bg); }

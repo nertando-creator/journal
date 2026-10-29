@@ -31,6 +31,8 @@
   const CAP_MIN_W = 240;                    // минимальная ширина рамки-кадра на экране, px (высота по пропорции)
   const CAP_CUT_MIN = 0.05;                 // линия обрезки показывается и используется только в диапазоне 5%..90% ширины рамки
   const CAP_CUT_MAX = 0.90;                 // правее линии на картинке всегда пусто: минимум 10% справа
+  const CAP_MIN_CANDLES = 5;                // в рамке левее линии должно быть не меньше стольких свечей (иначе отказ)
+  const CAP_MIN_PIXELS = 30;                // и не меньше стольких «свечных» пикселей (зелёных/красных) на снимке
   const CAP_CANDLES = 1500;                 // сколько свечей грузится в режиме съёмки
   const CAP_AFTER_CANDLES = 500;            // запас данных справа от конца выбранного дня (endTime = конец дня + 500 свечей, но не позже «сейчас»)
   const CAP_FRAME_MARGIN = 0.03;            // стартовая рамка: отступ от каждой стороны панели свечей (доля)
@@ -338,7 +340,7 @@
       this.ids.clear(); this.selectedId = this.hoverId = this.drawingId = null; this.tool = null; this._notify();
       safe('часовой пояс', () => chart.setTimezone(Intl.DateTimeFormat().resolvedOptions().timeZone));
       // minValue/maxValue здесь НЕ передавать: в v9.8.10 override записывает maxValue в minValue; они заданы в registerIndicator
-      safe('RSI-панель', () => chart.createIndicator(
+      if (!this.noRsi) safe('RSI-панель', () => chart.createIndicator(
         { name: 'MKT_RSI', styles: { lines: [{ color: this.colors.rsi, size: 1, style: 'solid', smooth: false, dashedValue: [2, 2] }] } },
         false, { height: cssNum('--mod-market-rsi-h', 140) }));
       const h = (ts) => (chart === this.chart ? this.loadMoreHandler(ts) : Promise.resolve({ list: [], more: false }));
@@ -790,6 +792,7 @@
       if (isTyping(e.target)) return;
       if (e.key === 'Delete' || e.key === 'Backspace') { e.preventDefault(); deleteSelectedLine(); }
       else if (e.key === 'Escape' && Chart.drawingId) { e.preventDefault(); Chart.cancelDrawing(); }
+      else if (e.key === 'Enter' && MarketCapture.isActive() && !e.target.closest('button')) { e.preventDefault(); MarketCapture.toggleCut(); }   // «обрезка» в режиме съёмки
     });
   }
 
@@ -806,7 +809,7 @@
     const frames = (n) => new Promise((r) => { const f = (i) => (i <= 0 ? r() : requestAnimationFrame(() => f(i - 1))); f(n); });
     const loadImage = (url) => new Promise((res, rej) => { const i = new Image(); i.onload = () => res(i); i.onerror = () => rej(new Error('снимок графика не открылся как картинка')); i.src = url; });
     let frame = null, drag = null, layer = null, frameEl = null, dims = [];
-    let cutTs = null, cutDim = null, cutLine = null, cutDrag = false, rafId = 0, lastCutX = NaN;   // линия обрезки: время открытия свечи, правый край которой и есть линия
+    let cutRatio = 0.75, cutOn = false, cutDim = null, cutLine = null, cutDown = null;   // линия обрезки: доля ширины рамки, без привязки к свечам и времени; cutOn: «обрезано» (правее линии фон закрыт полностью)
     const el$ = (id) => view.querySelector(id);
     const chartBox = () => el$('#mm-chart');
     // Границы кадра: только основная панель свечей (без шкал и RSI): левый верхний угол контейнера, размер из getSize
@@ -827,44 +830,20 @@
       frameEl.style.cssText = `left:${f.x}px;top:${f.y}px;width:${f.w}px;height:${f.h}px;`;
       const set = (d, l, t, w, h) => { d.style.cssText = `left:${l}px;top:${t}px;width:${Math.max(0, w)}px;height:${Math.max(0, h)}px;`; };
       set(dims[0], 0, 0, W, f.y); set(dims[1], 0, f.y + f.h, W, H - f.y - f.h); set(dims[2], 0, f.y, f.x, f.h); set(dims[3], f.x + f.w, f.y, W - f.x - f.w, f.h);
-      updateCut(true);
+      updateCut();
     }
-    // Геометрия свечей: по x последней свечи и шагу между соседними (в KLineChart свечи стоят по индексу, шаг одинаковый)
-    function geom() {
-      if (!Chart.chart) return null;
-      const list = safe('getDataList', () => Chart.chart.getDataList(), []), n = list.length;
-      if (!n) return null;
-      const px = (ts) => safe('x свечи', () => Chart.chart.convertToPixel({ timestamp: ts }, { paneId: 'candle_pane' }).x, NaN);
-      const xLast = px(list[n - 1].timestamp);
-      let step = n >= 2 ? xLast - px(list[n - 2].timestamp) : NaN;
-      if (!(step > 0)) step = safe('getBarSpace', () => { const b = Chart.chart.getBarSpace(); return b && (b.bar || b); }, NaN);
-      if (!Number.isFinite(xLast) || !(step > 0)) return null;
-      const idxOf = (ts) => { let lo = 0, hi = n - 1; while (lo <= hi) { const m = (lo + hi) >> 1, t = list[m].timestamp; if (t === ts) return m; if (t < ts) lo = m + 1; else hi = m - 1; } return -1; };
-      return { list, n, xLast, step, idxOf, edge: (i) => xLast + (i - (n - 1)) * step + step / 2 };   // edge(i): правый край свечи i
-    }
-    // Эффективная линия: из cutTs; если экранная позиция вышла за 5%..90% рамки, линия на границе диапазона (на краю свечи), а cutTs не меняется
-    function effCut(g) {
-      if (!g || !frame) return null;
-      let i = cutTs == null ? -1 : g.idxOf(cutTs);
-      if (i < 0) i = g.n - 1;
-      const minX = frame.x + CAP_CUT_MIN * frame.w, maxX = frame.x + CAP_CUT_MAX * frame.w, tol = 0.02;
-      let clamped = false;
-      if (g.edge(i) > maxX + 0.5) { i = Math.min(Math.max(Math.floor((maxX - g.xLast - g.step / 2) / g.step + (g.n - 1) + tol), 0), g.n - 1); clamped = true; }
-      else if (g.edge(i) < minX - 0.5) { i = Math.min(Math.max(Math.ceil((minX - g.xLast - g.step / 2) / g.step + (g.n - 1) - tol), 0), g.n - 1); clamped = true; }
-      return { i, x: Math.min(Math.max(g.edge(i), minX), maxX), clamped };
-    }
-    // DOM линии и затемнения: меняется только если x сдвинулся больше чем на 0.5 px (или force)
-    function updateCut(force) {
+    // Линия и затемнение: только из доли ширины рамки (график под ними двигается, линия стоит на месте)
+    function updateCut() {
       if (!frame || !cutLine) return;
-      const e = effCut(geom());
-      if (!e) { cutLine.hidden = cutDim.hidden = true; return; }
-      cutLine.hidden = cutDim.hidden = false;
-      if (!force && Math.abs(e.x - lastCutX) <= 0.5) return;
-      lastCutX = e.x;
-      const cx = e.x - frame.x - 1, inner = frame.w - 2;                    // координаты внутри рамки (минус её граница 1 px)
+      const cx = cutRatio * frame.w - 1, inner = frame.w - 2;              // координаты внутри рамки (минус её граница 1 px)
       cutLine.style.left = `${cx}px`; cutDim.style.left = `${cx}px`; cutDim.style.width = `${Math.max(0, inner - cx)}px`;
+      cutDim.classList.toggle('on', cutOn);
     }
-    const tick = () => { if (!cap) { rafId = 0; return; } if (!cutDrag) updateCut(false); rafId = requestAnimationFrame(tick); };
+    function toggleCut() {                                                 // Enter или двойной клик по линии: «обрезано» (фон непрозрачно) ↔ затемнение
+      if (!cap || !frame) return;
+      cutOn = !cutOn; updateCut();
+      logI(S(`обрезка ${cutOn ? 'включена' : 'выключена'} (линия ${(cutRatio * 100).toFixed(1)}% рамки)`));
+    }
     const setStatus = (t, err) => { const e = el$('#mm-cap-status'); if (e) { e.textContent = t || ''; e.classList.toggle('err', !!err); } };
     const lockUi = (on) => {
       view.classList.toggle('mod-market-cap-on', on);
@@ -884,22 +863,26 @@
       cutLine = document.createElement('div'); cutLine.className = 'mod-market-cap-cut';
       cutLine.innerHTML = '<i class="mod-market-cap-cut-line"></i>'; frameEl.appendChild(cutLine);
       layer.appendChild(frameEl); wrap.appendChild(layer);
-      cutLine.addEventListener('pointerdown', (e) => {                    // линия обрезки: двигается по горизонтали в обе стороны
+      cutLine.addEventListener('pointerdown', (e) => {                    // линия обрезки: двигается свободно по горизонтали в обе стороны
         if (!frame || e.button !== 0) return;
-        e.preventDefault(); e.stopPropagation(); cutDrag = true;
+        e.preventDefault(); e.stopPropagation();
+        cutDown = { sx: e.clientX, moved: false };
         try { cutLine.setPointerCapture(e.pointerId); } catch { /* ок */ }
       });
       cutLine.addEventListener('pointermove', (e) => {
-        if (!cutDrag || !frame) return;
-        const g = geom(); if (!g) return;
+        if (!cutDown || !frame) return;
+        if (!cutDown.moved) {                                              // перетаскиванием считается сдвиг больше 3 px (иначе двойной клик снимал бы обрезку сам)
+          if (Math.abs(e.clientX - cutDown.sx) <= 3) return;
+          cutDown.moved = true;
+          if (cutOn) { cutOn = false; logI(S('обрезка выключена (начато перетаскивание линии)')); }
+        }
         const rc = layer.getBoundingClientRect();
-        const X = Math.min(Math.max(e.clientX - rc.left, frame.x + CAP_CUT_MIN * frame.w), frame.x + CAP_CUT_MAX * frame.w);   // курсор в пределах 5%..90%
-        // ближайшая свеча, правый край которой левее курсора или на нём; правее последней загруженной свечи нельзя
-        const i = Math.min(Math.max(Math.floor((X - g.xLast - g.step / 2) / g.step + (g.n - 1) + 0.02), 0), g.n - 1);
-        cutTs = g.list[i].timestamp; updateCut(true);
+        cutRatio = Math.min(Math.max((e.clientX - rc.left - frame.x) / frame.w, CAP_CUT_MIN), CAP_CUT_MAX);   // зажим 5%..90% только при перетаскивании
+        updateCut();
       });
-      const cutEnd = () => { if (!cutDrag) return; cutDrag = false; const e = effCut(geom()); logI(S(`линия обрезки: свеча ${cutTs != null ? both(cutTs) : '?'}${e ? `, x=${e.x.toFixed(1)} (${((e.x - frame.x) / frame.w * 100).toFixed(1)}% рамки)` : ''}`)); };
+      const cutEnd = () => { if (!cutDown) return; const mv = cutDown.moved; cutDown = null; if (mv && frame) logI(S(`линия обрезки: ${(cutRatio * 100).toFixed(1)}% ширины рамки (x=${(frame.x + cutRatio * frame.w).toFixed(1)})`)); };
       cutLine.addEventListener('pointerup', cutEnd); cutLine.addEventListener('pointercancel', cutEnd);
+      cutLine.addEventListener('dblclick', (e) => { e.preventDefault(); e.stopPropagation(); toggleCut(); });
       frameEl.addEventListener('pointerdown', (e) => {                    // ловим только границу и ручки; внутри рамки события идут к графику
         const h = e.target.closest('[data-corner]'), ed = e.target.closest('[data-edge]');
         if ((!h && !ed) || !frame || e.button !== 0) return;
@@ -923,11 +906,35 @@
       });
       const end = () => { drag = null; };
       frameEl.addEventListener('pointerup', end); frameEl.addEventListener('pointercancel', end);
-      new ResizeObserver(() => { clampFrame(); paint(); positionPrev(); }).observe(wrap);   // окно изменилось: рамка остаётся в границах, линия считается из cutTs
+      new ResizeObserver(() => { clampFrame(); paint(); positionPrev(); }).observe(wrap);   // окно изменилось: рамка остаётся в границах, доля линии сохраняется
       el$('#mm-cap-save').onclick = () => save();
       el$('#mm-cap-cancel').onclick = () => cancel('кнопка «Отмена»');
     }
-    // Начальное положение (v5.7): рамка максимально крупная (отступ CAP_FRAME_MARGIN), график прокручен так, чтобы последняя свеча выбранного дня стояла на CAP_START_X ширины рамки, линия обрезки на её правом краю
+    // «Свечные» пиксели (зелёные/красные) на снимке: независимая проверка, что свечи действительно нарисованы в кадре (convertToPixel отдаёт x и для свечей за экраном)
+    const isCandlePx = (r, g, b) => (g - r >= 30 && g >= b) || (r - g >= 40 && r - b >= 40);
+    const countCandlePx = (d) => { let c = 0; for (let i = 0; i < d.data.length; i += 4) if (isCandlePx(d.data[i], d.data[i + 1], d.data[i + 2])) c++; return c; };
+    async function withCleanChart(fn) {                                  // без подсказки, перекрестия и метки последней цены (она цветная и сбивала бы подсчёт)
+      const chart = Chart.chart;
+      safe('скрыть подсказки', () => chart.setStyles({ candle: { tooltip: { showRule: 'none' }, priceMark: { last: { show: false } } }, crosshair: { show: false } }));
+      try { await frames(2); await sleep(80); return await fn(); }
+      finally { safe('вернуть подсказки', () => chart.setStyles({ candle: { tooltip: { showRule: 'always' }, priceMark: { last: { show: true } } }, crosshair: { show: true } })); }
+    }
+    async function candlePixels(f) {                                     // число свечных пикселей в области рамки; null, если снимок не получился
+      return withCleanChart(async () => {
+        const url = safe('getConvertPictureUrl (проверка)', () => Chart.chart.getConvertPictureUrl(false, 'png', cssVar('--mod-market-bg') || '#0B0B0B'), null);
+        if (!url || typeof url !== 'string') return null;
+        try {
+          const img = await loadImage(url), box = chartBox(), sx = img.naturalWidth / box.clientWidth, sy = img.naturalHeight / box.clientHeight;
+          const w = Math.max(1, Math.min(1000, Math.round(f.w))), h = Math.max(1, Math.round(w * f.h / f.w));
+          const cv = document.createElement('canvas'); cv.width = w; cv.height = h;
+          const ctx = cv.getContext('2d', { willReadFrequently: true });
+          ctx.drawImage(img, f.x * sx, f.y * sy, f.w * sx, f.h * sy, 0, 0, w, h);
+          return countCandlePx(ctx.getImageData(0, 0, w, h));
+        } catch (e) { logW(S(`проверка пикселей не удалась: ${msgOf(e)}`)); return null; }
+      });
+    }
+    // Начальное положение (v5.8): график должен быть ВИДЕН. Рамка максимально крупная (CAP_FRAME_MARGIN), последняя свеча выбранного дня на CAP_START_X ширины рамки (важнее видимость, чем точные 75%).
+    // Каждая попытка проверяется по факту: x свечи дня в рамке, число свечей в рамке (по x каждой свечи) и свечные пиксели на снимке.
     async function afterData() {
       if (!cap || !Chart.chart || !entry || !entry.bars.length) return;
       const id = sessId, chart = Chart.chart, bars = entry.bars;
@@ -938,37 +945,85 @@
       await frames(2); await sleep(120);
       if (!cap || id !== sessId) return;
       B = bounds();
-      let w = Math.min(B.w * (1 - 2 * CAP_FRAME_MARGIN), B.h * (1 - 2 * CAP_FRAME_MARGIN) * RATIO), h = w / RATIO;
+      const w = Math.min(B.w * (1 - 2 * CAP_FRAME_MARGIN), B.h * (1 - 2 * CAP_FRAME_MARGIN) * RATIO), h = w / RATIO;
       frame = { x: (B.w - w) / 2, y: (B.h - h) / 2, w, h };
       clampFrame(); paint(); positionPrev();
       let di = -1; for (let i = bars.length - 1; i >= 0; i--) if (bars[i].timestamp <= cap.endMs) { di = i; break; }
       if (di < 0) { setStatus('Нет свечей до конца выбранного дня', true); logW(S(`в загруженных данных нет свечей с открытием ≤ ${both(cap.endMs)}`)); return; }
-      const dayTs = bars[di].timestamp; cutTs = dayTs;
-      const tfms = TF_MS[cap.timeframe];
-      logI(S(`последняя свеча выбранного дня: открытие ${both(dayTs)}, закрытие ${both(dayTs + tfms)}${dayTs + tfms > Date.now() ? ' (свеча ещё не закрыта)' : ''}; свечей правее неё ${bars.length - 1 - di}, левее ${di}`));
-      // прокрутка: scrollToTimestamp, затем поправка scrollByDistance (до 3 итераций; знак определяется по факту)
-      const px = () => safe('x свечи', () => chart.convertToPixel({ timestamp: dayTs }, { paneId: 'candle_pane' }).x, NaN);
+      const dayTs = bars[di].timestamp, tfms = TF_MS[cap.timeframe];
+      const has = (m) => typeof chart[m] === 'function';
+      logI(S(`позиционирование: свечей загружено ${bars.length}, индекс свечи дня ${di} (${both(dayTs)}), закрытие ${both(dayTs + tfms)}${dayTs + tfms > Date.now() ? ' (свеча ещё не закрыта)' : ''}; справа от неё ${bars.length - 1 - di}; панель свечей ${Math.round(B.w)}×${Math.round(B.h)}, рамка ${Math.round(frame.w)}×${Math.round(frame.h)} в (${Math.round(frame.x)}, ${Math.round(frame.y)})`));
+      logI(S(`методы библиотеки: scrollToTimestamp ${has('scrollToTimestamp')}, scrollByDistance ${has('scrollByDistance')}, scrollToDataIndex ${has('scrollToDataIndex')}, scrollToRealTime ${has('scrollToRealTime')}, getVisibleRange ${has('getVisibleRange')}`));
+      const list0 = () => safe('getDataList', () => chart.getDataList(), []);
+      const px = (ts) => safe('x свечи', () => chart.convertToPixel({ timestamp: ts }, { paneId: 'candle_pane' }).x, NaN);
+      const stepNow = () => { const l = list0(), n = l.length; return n >= 2 ? px(l[n - 1].timestamp) - px(l[n - 2].timestamp) : NaN; };
       const target = () => frame.x + CAP_START_X * frame.w;
-      let how = 'scrollToTimestamp недоступен';
-      if (typeof chart.scrollToTimestamp === 'function') { safe('scrollToTimestamp', () => chart.scrollToTimestamp(dayTs, 0)); how = 'scrollToTimestamp'; await frames(3); }
-      let x = px(), sign = 1;
-      logI(S(`прокрутка: ${how}, x свечи после неё ${Number.isFinite(x) ? x.toFixed(1) : '?'}, цель ${target().toFixed(1)}`));
-      for (let it = 1; it <= 3 && Number.isFinite(x); it++) {
-        const err = target() - x;
-        if (!(Math.abs(err) > 1)) break;
-        if (typeof chart.scrollByDistance !== 'function') { logW(S('scrollByDistance недоступен, точная подгонка невозможна')); break; }
-        safe('scrollByDistance', () => chart.scrollByDistance(err * sign, 0));
-        await frames(3);
-        const x2 = px(), moved = x2 - x;
-        if (Math.abs(moved) > 0.5 && moved * err < 0) sign = -sign;           // сдвинуло в обратную сторону: знак перевёрнут для следующей итерации
-        logI(S(`подгонка ${it}: нужно ${err.toFixed(1)} px, сдвинуло ${Number.isFinite(moved) ? moved.toFixed(1) : '?'} px, x=${Number.isFinite(x2) ? x2.toFixed(1) : '?'}`));
-        x = x2;
+      const f2 = (x) => (Number.isFinite(x) ? x.toFixed(1) : '?');
+      // проверка по факту: x свечи дня, сколько свечей реально в рамке и в панели, свечные пиксели
+      async function inspect(label) {
+        if (!cap || id !== sessId) return { ok: false, stop: true };
+        const list = list0(), f = frame, P = bounds();
+        const xDay = px(dayTs);
+        let inFrame = 0, inPane = 0;
+        for (const b of list) { const x = px(b.timestamp); if (x >= f.x && x <= f.x + f.w) inFrame++; if (x >= 0 && x <= P.w) inPane++; }
+        const pix = await candlePixels(f);
+        const vr = has('getVisibleRange') ? safe('getVisibleRange', () => chart.getVisibleRange(), null) : null;
+        const dayIn = Number.isFinite(xDay) && xDay >= f.x + 2 && xDay <= f.x + f.w - 2;
+        const ok = dayIn && inFrame >= CAP_MIN_CANDLES && (pix === null || pix >= CAP_MIN_PIXELS);
+        logI(S(`проверка (${label}): x свечи дня ${f2(xDay)} (рамка ${f2(f.x)}..${f2(f.x + f.w)}), свечей в рамке ${inFrame}, в панели ${inPane} из ${list.length}, шаг ${f2(stepNow())} px, свечных пикселей ${pix === null ? 'нет снимка' : pix}${vr ? `, getVisibleRange ${JSON.stringify(vr)}` : ''} → ${ok ? 'ВИДНО' : 'НЕ видно'}`));
+        return { ok, xDay, inFrame, pix };
       }
-      const left = Number.isFinite(x) ? target() - x : NaN;
-      if (!(Math.abs(left) <= 2)) logW(S(`последняя свеча дня не встала на ${CAP_START_X * 100}% рамки: x=${Number.isFinite(x) ? x.toFixed(1) : '?'}, цель ${target().toFixed(1)}, расхождение ${Number.isFinite(left) ? left.toFixed(1) : '?'} px`));
-      updateCut(true); setStatus('');
-      const g = geom(), e = effCut(g);
-      logI(S(`график готов: свечей ${bars.length}, область свечей ${Math.round(B.w)}×${Math.round(B.h)}, рамка ${Math.round(frame.w)}×${Math.round(frame.h)}, шаг свечи ${g ? g.step.toFixed(2) : '?'} px, линия x=${e ? e.x.toFixed(1) : '?'}${e && e.clamped ? ' (прижата к границе)' : ''}`));
+      async function refine() {                                           // подгонка scrollByDistance; знак определяется по факту сдвига
+        let sign = 1, x = px(dayTs);
+        for (let it = 1; it <= 3 && Number.isFinite(x); it++) {
+          const err = target() - x;
+          if (!(Math.abs(err) > 1)) break;
+          if (!has('scrollByDistance')) { logW(S('scrollByDistance недоступен, точная подгонка невозможна')); break; }
+          safe('scrollByDistance', () => chart.scrollByDistance(err * sign, 0));
+          await frames(3);
+          const x2 = px(dayTs), moved = x2 - x;
+          if (Math.abs(moved) > 0.5 && moved * err < 0) sign = -sign;
+          logI(S(`подгонка ${it}: нужно ${f2(err)} px, сдвинуло ${f2(moved)} px, x=${f2(x2)}`));
+          x = x2;
+        }
+      }
+      const idxNow = () => { const l = list0(); let lo = 0, hi = l.length - 1; while (lo <= hi) { const m = (lo + hi) >> 1, t = l[m].timestamp; if (t === dayTs) return m; if (t < dayTs) lo = m + 1; else hi = m - 1; } return -1; };
+      const toRealTime = async () => { if (has('scrollToRealTime')) safe('scrollToRealTime', () => chart.scrollToRealTime(0)); safe('отступ справа', () => chart.setOffsetRightDistance(0.25 * B.w)); await frames(3); };
+      let v, way = '';
+      // (1) scrollToTimestamp + подгонка scrollByDistance
+      if (has('scrollToTimestamp')) { safe('scrollToTimestamp', () => chart.scrollToTimestamp(dayTs, 0)); await frames(3); await refine(); v = await inspect('путь 1: scrollToTimestamp + scrollByDistance'); if (v.ok) way = 'scrollToTimestamp + scrollByDistance'; }
+      // (2) scrollToDataIndex по индексу свечи в getDataList
+      if (!way && !v?.stop && has('scrollToDataIndex')) {
+        await toRealTime(); const ix = idxNow();
+        safe('scrollToDataIndex', () => chart.scrollToDataIndex(ix, 0)); await frames(3);
+        if (has('scrollByDistance')) await refine();
+        v = await inspect(`путь 2: scrollToDataIndex(${ix})`); if (v.ok) way = 'scrollToDataIndex';
+      }
+      // (3) от «реального времени» сдвигом на нужное число свечей × шаг (оба знака)
+      if (!way && !v?.stop && has('scrollByDistance')) {
+        for (const sgn of [1, -1]) {
+          await toRealTime();
+          const err3 = target() - px(dayTs);
+          safe('scrollByDistance', () => chart.scrollByDistance(sgn * err3, 0));
+          await frames(3);
+          v = await inspect(`путь 3: scrollToRealTime + сдвиг (знак ${sgn > 0 ? '+' : '−'})`);
+          if (v.ok) { way = `scrollToRealTime + scrollByDistance (знак ${sgn > 0 ? '+' : '−'})`; break; }
+        }
+      }
+      if (!cap || id !== sessId) return;
+      if (!way) {                                                         // (4) не вышло: хотя бы конец загруженных данных, чтобы график был виден
+        await toRealTime();
+        const msg = 'Не удалось показать выбранный день: показан конец загруженных данных, подвинь график';
+        setStatus(msg, true); logE(S(`${msg}; свеча дня не встала в рамку ни одним способом (см. строки «проверка» выше)`));
+        const vv = await inspect('запасной путь: scrollToRealTime');
+        if (!(vv.inFrame >= CAP_MIN_CANDLES)) logW(S(`даже конец данных не виден в рамке (свечей в рамке ${vv.inFrame}): проверь, что график вообще отрисован`));
+      } else logI(S(`позиционирование: сработал путь «${way}»`));
+      // линия обрезки: на правом краю свечи дня, доля считается один раз; дальше линия сама никуда не едет
+      const xr = px(dayTs) + stepNow() / 2;
+      cutRatio = way && Number.isFinite(xr) ? Math.min(Math.max((xr - frame.x) / frame.w, CAP_CUT_MIN), CAP_CUT_MAX) : 0.75; cutOn = false;   // не вышло позиционирование: линия по умолчанию на 75%
+      updateCut();
+      if (way) setStatus('');
+      logI(S(`график готов: линия ${(cutRatio * 100).toFixed(1)}% рамки (правый край свечи дня x=${f2(xr)}), рамка ${Math.round(frame.w)}×${Math.round(frame.h)}`));
     }
     // Окошко «Оригинал» в левом нижнем углу области графика (DOM поверх графика, pointer-events: none, в файл не попадает)
     function positionPrev() {
@@ -1000,16 +1055,18 @@
       view.querySelectorAll('.mod-market-tf').forEach((b) => b.classList.toggle('active', b.dataset.tf === o.timeframe));
       logI(S(`старт: ${o.symbol} ${o.timeframe}, день ${o.pickedDay || '?'}, конец дня ${both(o.endMs)}`));
       showPrev(o.previewUrl);
-      if (!rafId) rafId = requestAnimationFrame(tick);                // линия обрезки пересчитывается по времени в каждом кадре, пока включён режим
+      Chart.noRsi = true;                                             // в режиме съёмки RSI не создаётся (панель свечей выше); график пересоздастся при выходе
+      cutOn = false; cutDown = null;
       setView('market');                                              // откроет график; данные грузит openChart → MarketCapture.load
       if (chartReady) load();
       return true;
     }
     // Выход: прежний вид живого графика (выбор монеты и ТФ возвращается, данные перезагрузятся при следующем открытии вкладки)
     function exit(noView) {
-      const c = cap; cap = null; frame = null; drag = null; cutTs = null; cutDrag = false; lastCutX = NaN;
+      const c = cap; cap = null; frame = null; drag = null; cutOn = false; cutDown = null;
       lockUi(false); paint(); setStatus('');
       sessId++; entry = null; sel = c.prev; syncControls();
+      Chart.noRsi = false;                                             // живой график снова с RSI
       safe('пересоздание графика', () => Chart.rebuild());
       if (!noView && viewMode === 'market') setView('gallery');
       return c;
@@ -1031,19 +1088,26 @@
         if (c.beforeSave && !(await c.beforeSave())) { setStatus('Сохранение отменено'); logI(S('сохранение отменено (замена основной не подтверждена)')); return; }
         const chart = Chart.chart, box = chartBox(), cw = box.clientWidth, ch = box.clientHeight, f = { ...frame };
         logI(S(`сохранение: контейнер ${cw}×${ch}, рамка ${Math.round(f.w)}×${Math.round(f.h)} в (${Math.round(f.x)}, ${Math.round(f.y)}), devicePixelRatio ${window.devicePixelRatio}`));
-        const g = geom();
-        if (!g) throw mkErr('SHOT', 'не удалось определить положение свечей на графике (convertToPixel)');
-        const e = effCut(g);                                          // эффективная линия: с учётом зажима 5%..90% рамки; сохранённое cutTs не меняется
-        if (!e) throw mkErr('SHOT', 'не удалось определить положение линии обрезки');
-        const cutX = e.x, cutRatio = (cutX - f.x) / f.w, tol = 0.02;
-        const iLast = e.i;                                            // свеча, правый край которой на линии
-        const iFirst = Math.max(Math.ceil((f.x - g.xLast + g.step / 2) / g.step + (g.n - 1) - tol), 0);   // первая свеча целиком внутри рамки слева
-        logI(S(`геометрия: свечей загружено ${g.n}, x последней ${g.xLast.toFixed(1)}, шаг ${g.step.toFixed(2)} px, cutTs ${cutTs != null ? both(cutTs) : '?'}, линия x=${cutX.toFixed(1)} (${(cutRatio * 100).toFixed(2)}% рамки${e.clamped ? ', прижата к границе 5%..90%' : ''}), правый край свечи ${iLast} на x=${g.edge(iLast).toFixed(1)}`));
+        // свечи в рамке считаются по реальному x каждой свечи (не по индексам и формулам): «До» = последняя свеча, центр которой левее линии; «От» = первая свеча, целиком попадающая в рамку слева
+        const cutX = f.x + cutRatio * f.w;
+        const list = safe('getDataList', () => chart.getDataList(), []), n = list.length;
+        const pxb = (ts) => safe('x свечи', () => chart.convertToPixel({ timestamp: ts }, { paneId: 'candle_pane' }).x, NaN);
+        let step = n >= 2 ? pxb(list[n - 1].timestamp) - pxb(list[n - 2].timestamp) : NaN;
+        if (!(step > 0)) step = safe('getBarSpace', () => { const b = chart.getBarSpace(); return b && (b.bar || b); }, NaN);
+        if (!(step > 0)) throw mkErr('SHOT', 'не удалось определить шаг свечей на графике (convertToPixel)');
+        let firstTs = null, lastTs = null, inFrame = 0, inPane = 0;
+        const Pw = bounds().w;
+        for (let i = 0; i < n; i++) {
+          const x = pxb(list[i].timestamp);
+          if (!Number.isFinite(x)) continue;
+          if (x >= 0 && x <= Pw) inPane++;
+          if (x - step / 2 >= f.x - 0.5 && x <= cutX) { if (firstTs === null) firstTs = list[i].timestamp; lastTs = list[i].timestamp; inFrame++; }
+        }
+        logI(S(`геометрия: свечей загружено ${n}, в панели ${inPane}, шаг ${step.toFixed(2)} px, линия x=${cutX.toFixed(1)} (${(cutRatio * 100).toFixed(2)}% рамки), обрезка ${cutOn ? 'включена' : 'не включена'}`));
         const pts = safe('convertFromPixel', () => chart.convertFromPixel([{ x: f.x }, { x: cutX }], { paneId: 'candle_pane' }), null);   // только для диагностики
         if (pts && pts.length === 2) logI(S(`convertFromPixel (диагностика): слева dataIndex=${pts[0].dataIndex} ts=${pts[0].timestamp != null ? both(pts[0].timestamp) : '?'}; у линии dataIndex=${pts[1].dataIndex} ts=${pts[1].timestamp != null ? both(pts[1].timestamp) : '?'}`));
-        if (iLast < iFirst || iFirst > g.n - 1) throw mkErr('SHOT', 'левее линии нет ни одной свечи внутри рамки: подвинь рамку или линию');
-        const firstTs = g.list[iFirst].timestamp, lastTs = g.list[iLast].timestamp, inFrame = iLast - iFirst + 1;
-        logI(S(`свечей в рамке до линии ${inFrame}: первая («От») ${both(firstTs)}, последняя («До») ${both(lastTs)}`));
+        logI(S(`свечей в рамке левее линии ${inFrame}${firstTs !== null ? `: первая («От») ${both(firstTs)}, последняя («До») ${both(lastTs)}` : ''}`));
+        if (inFrame < CAP_MIN_CANDLES) { logW(S(`отказ: в кадре левее линии ${inFrame} свечей, нужно не меньше ${CAP_MIN_CANDLES} (в панели видно ${inPane} из ${n}, рамка x ${f.x.toFixed(1)}..${(f.x + f.w).toFixed(1)}, линия x=${cutX.toFixed(1)})`)); throw mkErr('SHOT', 'В кадре нет свечей: подвинь график'); }
         if (lastTs + TF_MS[c.timeframe] > Date.now()) logW(S('последняя свеча до линии ещё не закрыта: «До» это время её открытия'));
         // без подсказки свечи, перекрестия и метки последней цены (линии пользователя не попадают: includeOverlay = false)
         const bg = cssVar('--mod-market-bg') || '#0B0B0B';
@@ -1071,6 +1135,9 @@
         const cutPx = Math.round(cutRatio * EXPORT_W);                                                       // всё правее линии заливается фоном графика (линия и затемнение DOM, в файл не попадают)
         if (cutPx < EXPORT_W) { ctx.fillStyle = bg; ctx.fillRect(cutPx, 0, EXPORT_W - cutPx, EXPORT_H); }
         logI(S(`правее линии (x>${cutPx} из ${EXPORT_W}) залито фоном ${bg}`));
+        const pixCnt = cutPx > 0 ? countCandlePx(ctx.getImageData(0, 0, cutPx, EXPORT_H)) : 0;          // защита от пустой картинки: левее линии должны быть свечные пиксели
+        logI(S(`свечных пикселей левее линии: ${pixCnt} (нужно ≥ ${CAP_MIN_PIXELS})`));
+        if (pixCnt < CAP_MIN_PIXELS) { logW(S(`отказ: снимок пустой (свечных пикселей ${pixCnt} < ${CAP_MIN_PIXELS}), свечей по x в рамке ${inFrame}; ничего не записано`)); throw mkErr('SHOT', 'В кадре нет свечей: подвинь график'); }
         const fw = cssNum('--mod-market-frame-w', 1);                                                    // тонкая рамка вокруг картинки
         ctx.strokeStyle = cssVar('--mod-market-frame') || '#2a2a2a'; ctx.lineWidth = fw;
         ctx.strokeRect(fw / 2, fw / 2, EXPORT_W - fw, EXPORT_H - fw);
@@ -1080,7 +1147,7 @@
         let ver = ''; try { ver = typeof klinecharts.version === 'function' ? klinecharts.version() : ''; } catch { /* ок */ }
         await c.onSave({ blob, width: EXPORT_W, height: EXPORT_H, params: {
           mode: 'manual', anchor_end_ms: lastTs, first_ms: firstTs, last_ms: lastTs, candles_in_frame: inFrame,
-          picked_day: c.pickedDay || null, cut_right: true, cut_x_ratio: +cutRatio.toFixed(4), cut_max: CAP_CUT_MAX, after_candles: CAP_AFTER_CANDLES, cut_ts: cutTs, version: 'v5.7',
+          picked_day: c.pickedDay || null, cut_right: true, cut_x_ratio: +cutRatio.toFixed(4), cut_max: CAP_CUT_MAX, after_candles: CAP_AFTER_CANDLES, candles_left_of_cut: inFrame, cut_confirmed: cutOn, version: 'v5.8',
           dpr: window.devicePixelRatio, scale: +scale.toFixed(3), frame_px: { w: Math.round(f.w), h: Math.round(f.h) },
           source: 'binance_usdm', klinecharts: ver || null },
           range: { from: new Date(firstTs).toISOString(), to: new Date(lastTs).toISOString() } });
@@ -1093,7 +1160,7 @@
       }
       if (ok) { exit(false); logI(S('готово, возврат в «Формации»')); if (c.onDone) c.onDone(); }
     }
-    return { start, cancel, afterData, load, initDom, isActive: () => !!cap };
+    return { start, cancel, afterData, load, initDom, toggleCut, isActive: () => !!cap };
   })();
   window.MarketCapture = MarketCapture;
 
